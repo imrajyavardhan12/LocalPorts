@@ -2,6 +2,10 @@
 
 Fast local TCP port inspector for macOS, written in Zig. Shows which processes are listening and where.
 
+## Performance
+
+Typical warm runs complete in ~3–5ms on Apple Silicon. First run may be slower due to disk cache.
+
 ## Requirements
 
 - Zig 0.15.x
@@ -14,6 +18,13 @@ zig build -Doptimize=ReleaseFast
 ```
 
 The binary is output to `./zig-out/bin/localports`.
+
+## Install (Homebrew)
+
+```bash
+brew tap imrajyavardhan12/localports
+brew install localports
+```
 
 ## Usage
 
