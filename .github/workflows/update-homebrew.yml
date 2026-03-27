@@ -1,0 +1,54 @@
+name: Update Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  update-tap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute tarball SHA
+        id: tarball
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${OWNER}/LocalPorts/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Clone tap repo
+        env:
+          OWNER: ${{ github.repository_owner }}
+          TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://${TOKEN}@github.com/${OWNER}/homebrew-localports.git"
+
+      - name: Update formula
+        env:
+          URL: ${{ steps.tarball.outputs.url }}
+          SHA: ${{ steps.tarball.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cd homebrew-localports
+          sed -i "s|^  url \".*\"|  url \"${URL}\"|" Formula/localports.rb
+          sed -i "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" Formula/localports.rb
+
+      - name: Commit and push
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          cd homebrew-localports
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/localports.rb
+          git commit -m "Update localports formula to ${TAG}" || exit 0
+          git push
