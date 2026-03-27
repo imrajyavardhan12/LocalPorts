@@ -1,7 +1,9 @@
- const std = @import("std");
- const builtin = @import("builtin");
- const types = @import("types.zig");
- const output = @import("output.zig");
+const std = @import("std");
+const builtin = @import("builtin");
+const types = @import("types.zig");
+const output = @import("output.zig");
+
+const version = "0.1.1";
  
  pub fn main() !void {
      var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -23,7 +25,10 @@
              i += 1;
              if (i >= args.len) fatal("--port requires a value");
              filter_port = std.fmt.parseInt(u16, args[i], 10) catch fatal("invalid port number");
-         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
+            printVersion();
+            return;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
              printHelp();
              return;
          } else if (std.fmt.parseInt(u16, arg, 10)) |port| {
@@ -82,3 +87,11 @@
          \\
      , .{});
  }
+
+fn printVersion() void {
+    var out_buf: [64]u8 = undefined;
+    var file_writer = std.fs.File.stdout().writer(&out_buf);
+    const w = &file_writer.interface;
+    w.print("localports {s}\n", .{version}) catch {};
+    w.flush() catch {};
+}
