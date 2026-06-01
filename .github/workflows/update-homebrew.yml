@@ -11,15 +11,23 @@ jobs:
   update-tap:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: bash scripts/check-version.sh "${TAG}"
+
       - name: Compute tarball SHA
         id: tarball
         env:
           TAG: ${{ github.event.release.tag_name }}
-          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          URL="https://github.com/${OWNER}/LocalPorts/archive/refs/tags/${TAG}.tar.gz"
-          SHA=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
+          SHA=$(curl -fsSL "$URL" | sha256sum | awk '{print $1}')
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
@@ -29,7 +37,7 @@ jobs:
           TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          git clone "https://${TOKEN}@github.com/${OWNER}/homebrew-localports.git"
+          git clone --depth 1 "https://${TOKEN}@github.com/${OWNER}/homebrew-localports.git"
 
       - name: Update formula
         env:
@@ -37,9 +45,13 @@ jobs:
           SHA: ${{ steps.tarball.outputs.sha }}
         run: |
           set -euo pipefail
+          mkdir -p homebrew-localports/Formula
+          cp Formula/localports.rb homebrew-localports/Formula/localports.rb
           cd homebrew-localports
-          sed -i "s|^  url \".*\"|  url \"${URL}\"|" Formula/localports.rb
-          sed -i "s|^  sha256 \".*\"|  sha256 \"${SHA}\"|" Formula/localports.rb
+          perl -0pi -e 's|^  url ".*"|  url "$ENV{URL}"|m' Formula/localports.rb
+          perl -0pi -e 's|^  sha256 ".*"|  sha256 "$ENV{SHA}"|m' Formula/localports.rb
+          grep -F "${URL}" Formula/localports.rb
+          grep -F "${SHA}" Formula/localports.rb
 
       - name: Commit and push
         env:

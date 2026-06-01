@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS Zig 0.16
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Check formatting
+        run: zig fmt --check build.zig build.zig.zon src/*.zig
+
+      - name: Check version metadata
+        run: bash scripts/check-version.sh
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Test
+        run: zig build test
+
+      - name: Smoke test help
+        run: ./zig-out/bin/localports --help
+
+      - name: Smoke test version
+        run: ./zig-out/bin/localports --version | grep '^localports '
+
+      - name: Smoke test JSON
+        run: ./zig-out/bin/localports --json | python3 -m json.tool > /dev/null
