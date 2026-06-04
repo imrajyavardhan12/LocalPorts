@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("cli.zig");
 const output = @import("output.zig");
 const killcmd = @import("kill.zig");
@@ -6,6 +7,15 @@ const types = @import("types.zig");
 const watch = @import("watch.zig");
 
 const PortEntry = types.PortEntry;
+
+// Pull in the platform backend's own tests on the platforms where it compiles.
+// The Darwin backend's socket-decode logic lives behind libproc structs that
+// only have a valid layout on macOS, so it is only referenced there.
+test {
+    if (builtin.os.tag == .macos) {
+        _ = @import("darwin.zig");
+    }
+}
 
 test "CLI defaults to table scan" {
     const argv = [_][]const u8{"localports"};

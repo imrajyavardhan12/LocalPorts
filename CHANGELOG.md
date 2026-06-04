@@ -1,6 +1,23 @@
 # Changelog
 
-## 0.2.0 - Unreleased
+## Unreleased
+
+### Fixed
+
+- macOS scanner no longer silently truncates results. The PID list and each
+  process's file-descriptor list are now sized dynamically (libproc
+  two-call idiom with headroom) instead of using fixed 4096-PID / 2048-FD
+  buffers, so listeners are no longer dropped on busy systems or from
+  processes with many descriptors.
+
+### Changed
+
+- Extracted the listening-socket decode into a pure `decodeListenSocket`
+  function and added unit tests covering IPv4, IPv6, and the
+  non-TCP / non-listening / port-zero rejection cases. The scanner's core
+  decoding is now testable without syscalls.
+
+## 0.2.0 - 2026-06-01
 
 ### Added
 
