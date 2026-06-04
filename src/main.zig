@@ -41,15 +41,26 @@ pub fn main(init: std.process.Init) !void {
     const entries = try doScan(allocator, config.filter_port);
     defer allocator.free(entries);
 
+    // Verbose fields (user, command) are arena-backed; one deinit frees them all.
+    var verbose_arena = std.heap.ArenaAllocator.init(allocator);
+    defer verbose_arena.deinit();
+    if (config.verbose) doEnrich(verbose_arena.allocator(), entries);
+
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
     if (config.json_output) {
-        try output.writeJson(w, entries);
+        try output.writeJson(w, entries, config.verbose);
     } else {
-        try output.writeTable(w, entries);
+        try output.writeTable(w, entries, config.verbose);
     }
     try w.flush();
+}
+
+fn doEnrich(arena: std.mem.Allocator, entries: []PortEntry) void {
+    if (builtin.os.tag == .macos) {
+        @import("darwin.zig").enrich(arena, entries);
+    }
 }
 
 fn doScan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
@@ -93,6 +104,7 @@ fn printHelp(io: std.Io) void {
         \\  --watch, -w [secs]  Watch mode (default 2 seconds)
         \\  --kill, -k <port>   Kill process on port (refuses ambiguous matches)
         \\  --force, -f         Skip confirmation for --kill
+        \\  --verbose           Show user and full command (scan only; use sudo for all)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
@@ -167,7 +179,7 @@ fn killHandler(allocator: std.mem.Allocator, port: u16, force: bool, io: std.Io)
             var out_buf: [65536]u8 = undefined;
             var file_writer = std.Io.File.stdout().writer(io, &out_buf);
             const w = &file_writer.interface;
-            try output.writeTable(w, entries);
+            try output.writeTable(w, entries, false);
             try w.flush();
 
             std.process.exit(1);

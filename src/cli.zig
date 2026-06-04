@@ -15,6 +15,7 @@ pub const Config = struct {
     watch_interval: u32 = 2,
     kill_port: ?u16 = null,
     force_kill: bool = false,
+    verbose: bool = false,
 };
 
 pub const ParseFailureKind = enum {
@@ -65,6 +66,8 @@ pub fn parseArgs(args: anytype) ParseResult {
             config.kill_port = std.fmt.parseInt(u16, args[i], 10) catch return fail(.invalid_port_number, args[i]);
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             config.force_kill = true;
+        } else if (std.mem.eql(u8, arg, "--verbose")) {
+            config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
             config.action = .version;
             return .{ .config = config };

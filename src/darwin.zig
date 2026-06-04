@@ -7,6 +7,8 @@ extern "c" fn proc_listallpids(buffer: ?*anyopaque, buffersize: c_int) c_int;
 extern "c" fn proc_pidinfo(pid: c_int, flavor: c_int, arg: u64, buffer: ?*anyopaque, buffersize: c_int) c_int;
 extern "c" fn proc_pidfdinfo(pid: c_int, fd: c_int, flavor: c_int, buffer: ?*anyopaque, buffersize: c_int) c_int;
 extern "c" fn proc_name(pid: c_int, buffer: ?*anyopaque, buffersize: u32) c_int;
+extern "c" fn getpwuid(uid: u32) ?*Passwd;
+extern "c" fn sysctl(name: [*c]c_int, namelen: c_uint, oldp: ?*anyopaque, oldlenp: ?*usize, newp: ?*anyopaque, newlen: usize) c_int;
 
 // ── Constants from sys/proc_info.h ────────────────────────────────────────
 const PROC_PIDLISTFDS: c_int = 1;
@@ -18,6 +20,17 @@ const TSI_S_LISTEN: i32 = 1;
 const INI_IPV4: u8 = 0x1;
 const INI_IPV6: u8 = 0x2;
 const SZOMB: u32 = 5;
+
+// sysctl MIB constants for verbose process-argument lookup.
+const CTL_KERN: c_int = 1;
+const KERN_ARGMAX: c_int = 8;
+const KERN_PROCARGS2: c_int = 49;
+
+// Partial struct passwd: we only read pw_name, which is the first member, so
+// reading it through this prefix-compatible layout is ABI-safe.
+const Passwd = extern struct {
+    pw_name: ?[*:0]const u8,
+};
 
 // ── C struct definitions matching sys/proc_info.h layout ─────────────────
 const ProcFdInfo = extern struct {
@@ -170,6 +183,72 @@ pub fn processIsRunning(pid: u32) bool {
     const r = proc_pidinfo(@intCast(pid), PROC_PIDTBSDINFO, 0, @ptrCast(&info), @intCast(@sizeOf(ProcBsdInfo)));
     if (r < @as(c_int, @intCast(@sizeOf(ProcBsdInfo)))) return false;
     return info.pbi_status != SZOMB;
+}
+
+// ── Verbose enrichment (user + full command) ──────────────────────────────
+
+/// Populate the verbose-only fields (`user`, `command`) of each entry.
+/// Best-effort: any field that cannot be resolved (e.g. another user's
+/// process without sudo) is left null. All strings are allocated from the
+/// caller-owned `arena`, so the caller frees everything at once.
+pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry) void {
+    // One reusable scratch buffer for KERN_PROCARGS2, sized to kern.argmax.
+    const argmax = sysctlArgmax() orelse 4096;
+    const scratch: ?[]u8 = arena.alloc(u8, argmax) catch null;
+
+    for (entries) |*e| {
+        e.user = lookupUser(arena, e.pid);
+        if (scratch) |s| e.command = lookupCommand(arena, s, e.pid);
+    }
+}
+
+fn sysctlArgmax() ?usize {
+    var argmax: c_int = 0;
+    var size: usize = @sizeOf(c_int);
+    var mib = [_]c_int{ CTL_KERN, KERN_ARGMAX };
+    if (sysctl(&mib, 2, &argmax, &size, null, 0) != 0) return null;
+    if (argmax <= 0) return null;
+    return @intCast(argmax);
+}
+
+fn lookupUser(arena: std.mem.Allocator, pid: u32) ?[]const u8 {
+    var info: ProcBsdInfo = undefined;
+    const r = proc_pidinfo(@intCast(pid), PROC_PIDTBSDINFO, 0, @ptrCast(&info), @intCast(@sizeOf(ProcBsdInfo)));
+    if (r < @as(c_int, @intCast(@sizeOf(ProcBsdInfo)))) return null;
+
+    const pw = getpwuid(info.pbi_uid) orelse return null;
+    const name_ptr = pw.pw_name orelse return null;
+    return arena.dupe(u8, std.mem.span(name_ptr)) catch null;
+}
+
+fn lookupCommand(arena: std.mem.Allocator, scratch: []u8, pid: u32) ?[]const u8 {
+    var size: usize = scratch.len;
+    var mib = [_]c_int{ CTL_KERN, KERN_PROCARGS2, @intCast(pid) };
+    if (sysctl(&mib, 3, scratch.ptr, &size, null, 0) != 0) return null;
+    if (size < @sizeOf(c_int)) return null;
+    const data = scratch[0..size];
+
+    // Layout: [argc: i32][exec_path \0][null padding][argv[0] \0]...[argv[argc-1] \0][env...]
+    var argc: c_int = undefined;
+    @memcpy(std.mem.asBytes(&argc), data[0..@sizeOf(c_int)]);
+    if (argc <= 0) return null;
+
+    var i: usize = @sizeOf(c_int);
+    while (i < data.len and data[i] != 0) : (i += 1) {} // skip exec_path
+    while (i < data.len and data[i] == 0) : (i += 1) {} // skip null padding
+
+    var out: std.ArrayList(u8) = .empty;
+    var count: c_int = 0;
+    while (count < argc and i < data.len) : (count += 1) {
+        const start = i;
+        while (i < data.len and data[i] != 0) : (i += 1) {}
+        if (count > 0) out.append(arena, ' ') catch return null;
+        out.appendSlice(arena, data[start..i]) catch return null;
+        i += 1; // skip the terminating null
+    }
+
+    if (out.items.len == 0) return null;
+    return out.toOwnedSlice(arena) catch null;
 }
 
 // ── Listening-socket decode (pure, unit-tested) ──────────────────────────
