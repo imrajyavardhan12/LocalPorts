@@ -220,6 +220,14 @@ fn decodeListenSocket(sfi: *const SocketFdInfo) ?DecodedListen {
 
 // ── Scanner ───────────────────────────────────────────────────────────────
 
+// Headroom added to each libproc size query: a process (or a process's set of
+// file descriptors) can appear between the size query and the fill, so we
+// over-allocate slightly to avoid re-truncating in that window.
+const pid_query_headroom = 64;
+const fd_query_headroom = 32;
+// Initial FD buffer size, grown on demand for processes with more descriptors.
+const fd_initial_capacity = 256;
+
 pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     // Size the PID buffer dynamically. proc_listallpids(null, 0) reports how
     // many PIDs currently exist; we add headroom because processes can spawn
@@ -227,7 +235,7 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     // truncate on busy systems and make listeners vanish from the scan.
     const pid_hint = proc_listallpids(null, 0);
     if (pid_hint <= 0) return error.ProcListPidsFailed;
-    const pid_capacity: usize = @as(usize, @intCast(pid_hint)) + 64;
+    const pid_capacity: usize = @as(usize, @intCast(pid_hint)) + pid_query_headroom;
 
     const pid_buf = try allocator.alloc(i32, pid_capacity);
     defer allocator.free(pid_buf);
@@ -241,7 +249,7 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
 
     // Reusable FD buffer, grown on demand so a process with many descriptors
     // (databases, proxies, language servers) is never truncated.
-    var fd_buf = try allocator.alloc(ProcFdInfo, 256);
+    var fd_buf = try allocator.alloc(ProcFdInfo, fd_initial_capacity);
     defer allocator.free(fd_buf);
 
     var sfi: SocketFdInfo = undefined;
@@ -253,8 +261,8 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
         const fd_needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, null, 0);
         if (fd_needed <= 0) continue;
         const fd_needed_count: usize = @intCast(@divTrunc(fd_needed, @sizeOf(ProcFdInfo)));
-        if (fd_needed_count + 32 > fd_buf.len) {
-            fd_buf = try allocator.realloc(fd_buf, fd_needed_count + 32);
+        if (fd_needed_count + fd_query_headroom > fd_buf.len) {
+            fd_buf = try allocator.realloc(fd_buf, fd_needed_count + fd_query_headroom);
         }
 
         const fd_bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, @ptrCast(fd_buf.ptr), @intCast(fd_buf.len * @sizeOf(ProcFdInfo)));
