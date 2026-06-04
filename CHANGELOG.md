@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `--verbose` shows the owning user and full command line for each listener,
+  in both table and JSON output. The command line is resolved via
+  `KERN_PROCARGS2` and the user via `getpwuid`; fields that require ownership
+  fall back to `-` (table) or `""` (JSON) without sudo. Verbose JSON fields
+  are added only under `--json --verbose`, leaving the default JSON contract
+  unchanged for scripts.
+
 ### Fixed
 
 - macOS scanner no longer silently truncates results. The PID list and each

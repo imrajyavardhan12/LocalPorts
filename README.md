@@ -38,6 +38,7 @@ brew install localports
 localports [port]
 localports --port, -p <port>
 localports --json
+localports --verbose
 localports --watch, -w [seconds]
 localports --kill, -k <port> [--force]
 localports --help, -h
@@ -51,6 +52,9 @@ Examples:
 ./zig-out/bin/localports 3000
 ./zig-out/bin/localports --port 3000
 ./zig-out/bin/localports --json
+./zig-out/bin/localports --verbose
+./zig-out/bin/localports -p 3000 --verbose
+./zig-out/bin/localports --json --verbose
 ./zig-out/bin/localports --watch
 ./zig-out/bin/localports --watch 1
 ./zig-out/bin/localports 3000 --watch
@@ -97,6 +101,38 @@ Safety behavior:
 - If multiple processes are listening on the same port, `localports` refuses to choose one automatically, prints the matching rows, and exits with code `1`.
 - If permission is denied, exits with code `1` and suggests `sudo`.
 - If the confirmation prompt is declined, exits with code `2`.
+
+## Verbose mode
+
+`--verbose` adds the owning user and the full command line for each listener, so you can tell *which* `node` or `python` is holding a port:
+
+```bash
+localports --verbose
+localports -p 3000 --verbose
+localports --json --verbose
+```
+
+```text
+PORT   PID    PROCESS  ADDRESS    USER  COMMAND
+8000   14682  Python   127.0.0.1  rvs   python3 -m http.server 8000 --bind 127.0.0.1
+```
+
+The command line and (occasionally) the user come from per-process lookups that require ownership. For processes owned by other users, run with `sudo` to see the full command; otherwise those fields show `-`.
+
+## JSON output
+
+The default `--json` shape is a stable contract. Each row always has these fields, and new fields are only added behind explicit flags so existing scripts keep working:
+
+```json
+{ "port": 8000, "pid": 6524, "proto": "tcp", "process": "Python", "address": "127.0.0.1" }
+```
+
+`--json --verbose` adds two more fields per row. When a value is unavailable they are emitted as empty strings:
+
+```json
+{ "port": 8000, "pid": 6524, "proto": "tcp", "process": "Python", "address": "127.0.0.1",
+  "user": "rvs", "command": "python3 -m http.server 8000 --bind 127.0.0.1" }
+```
 
 ## Example
 

@@ -68,6 +68,27 @@ test "CLI parses kill mode and force" {
     try std.testing.expect(config.force_kill);
 }
 
+test "CLI parses verbose flag" {
+    const defaults = [_][]const u8{"localports"};
+    const default_config = try expectConfig(cli.parseArgs(defaults[0..]));
+    try std.testing.expect(!default_config.verbose);
+
+    const verbose = [_][]const u8{ "localports", "--verbose" };
+    const verbose_config = try expectConfig(cli.parseArgs(verbose[0..]));
+    try std.testing.expectEqual(cli.Action.scan, verbose_config.action);
+    try std.testing.expect(verbose_config.verbose);
+
+    const json_verbose = [_][]const u8{ "localports", "--json", "--verbose" };
+    const json_verbose_config = try expectConfig(cli.parseArgs(json_verbose[0..]));
+    try std.testing.expect(json_verbose_config.verbose);
+    try std.testing.expect(json_verbose_config.json_output);
+
+    const filtered = [_][]const u8{ "localports", "-p", "8000", "--verbose" };
+    const filtered_config = try expectConfig(cli.parseArgs(filtered[0..]));
+    try std.testing.expectEqual(@as(?u16, 8000), filtered_config.filter_port);
+    try std.testing.expect(filtered_config.verbose);
+}
+
 test "CLI rejects JSON watch output" {
     const argv = [_][]const u8{ "localports", "--json", "--watch" };
     _ = try expectFailure(.watch_json_unsupported, cli.parseArgs(argv[0..]));
@@ -164,13 +185,13 @@ test "kill target selection refuses ambiguous matches" {
 test "table output renders empty scans and IPv4 rows" {
     var empty_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer empty_writer.deinit();
-    try output.writeTable(&empty_writer.writer, &.{});
+    try output.writeTable(&empty_writer.writer, &.{}, false);
     try std.testing.expectEqualStrings("No listening TCP ports found.\n", empty_writer.written());
 
     var row_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer row_writer.deinit();
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
-    try output.writeTable(&row_writer.writer, entries[0..]);
+    try output.writeTable(&row_writer.writer, entries[0..], false);
     try std.testing.expectEqualStrings(
         "PORT   PID    PROCESS  ADDRESS\n" ++
             "3000   123    node     127.0.0.1\n",
@@ -183,7 +204,7 @@ test "JSON output renders valid fields and escapes process names" {
     defer writer.deinit();
 
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node\\\"dev", .{ 127, 0, 0, 1 })};
-    try output.writeJson(&writer.writer, entries[0..]);
+    try output.writeJson(&writer.writer, entries[0..], false);
 
     try std.testing.expectEqualStrings(
         "[\n" ++
@@ -199,7 +220,7 @@ test "JSON output escapes control characters" {
 
     const process_name = [_]u8{ 'l', 'i', 'n', 'e', '\n', '\t', 0x01 };
     const entries = [_]PortEntry{entryIPv4(3000, 123, process_name[0..], .{ 127, 0, 0, 1 })};
-    try output.writeJson(&writer.writer, entries[0..]);
+    try output.writeJson(&writer.writer, entries[0..], false);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"process\":\"line\\n\\t\\u0001\"") != null);
 }
@@ -214,9 +235,79 @@ test "JSON output renders IPv6 addresses" {
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x01,
     })};
-    try output.writeJson(&writer.writer, entries[0..]);
+    try output.writeJson(&writer.writer, entries[0..], false);
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"2001:0db8:0000:0000:0000:0000:0000:0001\"") != null);
+}
+
+test "verbose table renders USER and COMMAND columns" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    entries[0].user = "rvs";
+    entries[0].command = "node server.js";
+    try output.writeTable(&writer.writer, entries[0..], true);
+
+    try std.testing.expectEqualStrings(
+        "PORT   PID    PROCESS  ADDRESS    USER  COMMAND\n" ++
+            "3000   123    node     127.0.0.1  rvs   node server.js\n",
+        writer.written(),
+    );
+}
+
+test "verbose table shows dashes for missing user and command" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    try output.writeTable(&writer.writer, entries[0..], true);
+
+    try std.testing.expectEqualStrings(
+        "PORT   PID    PROCESS  ADDRESS    USER  COMMAND\n" ++
+            "3000   123    node     127.0.0.1  -     -\n",
+        writer.written(),
+    );
+}
+
+test "verbose JSON adds user and command fields" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    entries[0].user = "rvs";
+    entries[0].command = "node server.js";
+    try output.writeJson(&writer.writer, entries[0..], true);
+
+    try std.testing.expectEqualStrings(
+        "[\n" ++
+            "  {\"port\":3000,\"pid\":123,\"proto\":\"tcp\",\"process\":\"node\",\"address\":\"127.0.0.1\",\"user\":\"rvs\",\"command\":\"node server.js\"}\n" ++
+            "]\n",
+        writer.written(),
+    );
+}
+
+test "verbose JSON emits empty strings for missing user and command" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    try output.writeJson(&writer.writer, entries[0..], true);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"user\":\"\",\"command\":\"\"") != null);
+}
+
+test "default JSON omits verbose fields" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    entries[0].user = "rvs";
+    entries[0].command = "node server.js";
+    try output.writeJson(&writer.writer, entries[0..], false);
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "user") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "command") == null);
 }
 
 fn expectConfig(result: cli.ParseResult) !cli.Config {

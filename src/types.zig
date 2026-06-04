@@ -6,6 +6,11 @@ pub const PortEntry = struct {
     addr4: [4]u8,
     addr6: [16]u8,
     is_ipv6: bool,
+    // Verbose-only fields, populated on demand by the platform backend's
+    // enrich step. Null means not requested or not available (e.g. another
+    // user's process without sudo). Backed by a caller-owned arena.
+    user: ?[]const u8 = null,
+    command: ?[]const u8 = null,
 };
 
 pub const RowState = enum {

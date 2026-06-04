@@ -11,7 +11,7 @@ pub const ansi = struct {
     pub const clear_screen = "\x1b[2J\x1b[H";
 };
 
-pub fn writeTable(writer: anytype, entries: []const PortEntry) !void {
+pub fn writeTable(writer: anytype, entries: []const PortEntry, verbose: bool) !void {
     if (entries.len == 0) {
         try writer.writeAll("No listening TCP ports found.\n");
         return;
@@ -23,21 +23,51 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry) !void {
         if (e.name_len + 2 > proc_col) proc_col = e.name_len + 2;
     }
 
-    // Header row.
+    if (!verbose) {
+        // Header row.
+        try writer.print("PORT   PID    ", .{});
+        try padWrite(writer, "PROCESS", proc_col);
+        try writer.writeAll("ADDRESS\n");
+
+        for (entries) |e| {
+            const name = e.name[0..e.name_len];
+            try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
+            try padWrite(writer, name, proc_col);
+            try writeAddrStr(writer, &e);
+            try writer.writeByte('\n');
+        }
+        return;
+    }
+
+    // Verbose: ADDRESS and USER also need padding (COMMAND is last).
+    var addr_buf: [46]u8 = undefined;
+    var addr_col: usize = 9; // "ADDRESS" + 2
+    var user_col: usize = 6; // "USER" + 2
+    for (entries) |e| {
+        const addr_len = formatAddr(&addr_buf, &e).len;
+        if (addr_len + 2 > addr_col) addr_col = addr_len + 2;
+        const user: []const u8 = e.user orelse "-";
+        if (user.len + 2 > user_col) user_col = user.len + 2;
+    }
+
     try writer.print("PORT   PID    ", .{});
     try padWrite(writer, "PROCESS", proc_col);
-    try writer.writeAll("ADDRESS\n");
+    try padWrite(writer, "ADDRESS", addr_col);
+    try padWrite(writer, "USER", user_col);
+    try writer.writeAll("COMMAND\n");
 
     for (entries) |e| {
         const name = e.name[0..e.name_len];
         try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
         try padWrite(writer, name, proc_col);
-        try writeAddrStr(writer, &e);
+        try padWrite(writer, formatAddr(&addr_buf, &e), addr_col);
+        try padWrite(writer, e.user orelse "-", user_col);
+        try writer.writeAll(e.command orelse "-");
         try writer.writeByte('\n');
     }
 }
 
-pub fn writeJson(writer: anytype, entries: []const PortEntry) !void {
+pub fn writeJson(writer: anytype, entries: []const PortEntry, verbose: bool) !void {
     try writer.writeByte('[');
     for (entries, 0..) |e, i| {
         if (i > 0) try writer.writeByte(',');
@@ -46,7 +76,16 @@ pub fn writeJson(writer: anytype, entries: []const PortEntry) !void {
         try writeJsonEscaped(writer, e.name[0..e.name_len]);
         try writer.writeAll("\",\"address\":\"");
         try writeAddrStr(writer, &e);
-        try writer.writeAll("\"}");
+        try writer.writeByte('"');
+        // Verbose-only fields. Default JSON stays untouched for scripts.
+        if (verbose) {
+            try writer.writeAll(",\"user\":\"");
+            try writeJsonEscaped(writer, e.user orelse "");
+            try writer.writeAll("\",\"command\":\"");
+            try writeJsonEscaped(writer, e.command orelse "");
+            try writer.writeByte('"');
+        }
+        try writer.writeByte('}');
     }
     if (entries.len > 0) try writer.writeByte('\n');
     try writer.writeAll("]\n");
@@ -116,15 +155,23 @@ fn padWrite(writer: anytype, s: []const u8, col_width: usize) !void {
 }
 
 fn writeAddrStr(writer: anytype, e: *const PortEntry) !void {
+    var buf: [46]u8 = undefined;
+    try writer.writeAll(formatAddr(&buf, e));
+}
+
+/// Render an address into `buf` and return the written slice. `buf` must be at
+/// least 39 bytes (longest is a zero-padded IPv6 address). Single source of
+/// truth for both rendering and column-width measurement.
+fn formatAddr(buf: []u8, e: *const PortEntry) []const u8 {
     if (e.is_ipv6) {
         const b = &e.addr6;
-        var i: usize = 0;
-        while (i < 16) : (i += 2) {
-            if (i > 0) try writer.writeByte(':');
-            try writer.print("{x:0>2}{x:0>2}", .{ b[i], b[i + 1] });
-        }
-    } else {
-        const b = &e.addr4;
-        try writer.print("{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] });
+        return std.fmt.bufPrint(buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
+            b[0],  b[1],  b[2],  b[3],
+            b[4],  b[5],  b[6],  b[7],
+            b[8],  b[9],  b[10], b[11],
+            b[12], b[13], b[14], b[15],
+        }) catch unreachable; // buf is provably large enough (see doc comment)
     }
+    const b = &e.addr4;
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch unreachable;
 }
