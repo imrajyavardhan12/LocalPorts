@@ -172,27 +172,102 @@ pub fn processIsRunning(pid: u32) bool {
     return info.pbi_status != SZOMB;
 }
 
+// ── Listening-socket decode (pure, unit-tested) ──────────────────────────
+
+const DecodedListen = struct {
+    port: u16,
+    is_ipv6: bool,
+    addr4: [4]u8,
+    addr6: [16]u8,
+};
+
+/// Decode a `socket_fdinfo` into a listening-TCP descriptor, or null if the
+/// socket is not TCP, not in the LISTEN state, or bound to port 0.
+///
+/// Pure: performs no syscalls and no allocation, so it is unit-tested against
+/// synthetic `SocketFdInfo` values. PID and process name are resolved
+/// separately by `scan`, since they are not part of the socket info.
+fn decodeListenSocket(sfi: *const SocketFdInfo) ?DecodedListen {
+    const si = &sfi.psi;
+    if (si.soi_kind != SOCKINFO_TCP) return null;
+
+    const tcp = &si.soi_proto.pri_tcp;
+    if (tcp.tcpsi_state != TSI_S_LISTEN) return null;
+
+    const ini = &tcp.tcpsi_ini;
+
+    // Local port is stored in network byte order.
+    const lport_bytes = std.mem.asBytes(&ini.insi_lport);
+    const port = std.mem.readInt(u16, lport_bytes[0..2], .big);
+    if (port == 0) return null;
+
+    var decoded = DecodedListen{
+        .port = port,
+        .is_ipv6 = false,
+        .addr4 = .{ 0, 0, 0, 0 },
+        .addr6 = .{0} ** 16,
+    };
+
+    if (ini.insi_vflag & INI_IPV4 != 0) {
+        @memcpy(&decoded.addr4, std.mem.asBytes(&ini.insi_laddr.in46.addr4));
+    } else if (ini.insi_vflag & INI_IPV6 != 0) {
+        @memcpy(&decoded.addr6, std.mem.asBytes(&ini.insi_laddr.in6.words));
+        decoded.is_ipv6 = true;
+    }
+
+    return decoded;
+}
+
 // ── Scanner ───────────────────────────────────────────────────────────────
 
+// Headroom added to each libproc size query: a process (or a process's set of
+// file descriptors) can appear between the size query and the fill, so we
+// over-allocate slightly to avoid re-truncating in that window.
+const pid_query_headroom = 64;
+const fd_query_headroom = 32;
+// Initial FD buffer size, grown on demand for processes with more descriptors.
+const fd_initial_capacity = 256;
+
 pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
-    var pid_buf: [4096]i32 = undefined;
-    const n_raw = proc_listallpids(@ptrCast(&pid_buf), @intCast(@sizeOf(@TypeOf(pid_buf))));
-    if (n_raw <= 0) return error.ProcListPidsFailed;
-    const n_pids: usize = @intCast(n_raw);
+    // Size the PID buffer dynamically. proc_listallpids(null, 0) reports how
+    // many PIDs currently exist; we add headroom because processes can spawn
+    // between this query and the fill below. A fixed buffer would silently
+    // truncate on busy systems and make listeners vanish from the scan.
+    const pid_hint = proc_listallpids(null, 0);
+    if (pid_hint <= 0) return error.ProcListPidsFailed;
+    const pid_capacity: usize = @as(usize, @intCast(pid_hint)) + pid_query_headroom;
+
+    const pid_buf = try allocator.alloc(i32, pid_capacity);
+    defer allocator.free(pid_buf);
+
+    const pid_filled = proc_listallpids(@ptrCast(pid_buf.ptr), @intCast(pid_capacity * @sizeOf(i32)));
+    if (pid_filled <= 0) return error.ProcListPidsFailed;
+    const n_pids: usize = @min(@as(usize, @intCast(pid_filled)), pid_capacity);
 
     var entries: std.ArrayList(PortEntry) = .empty;
     errdefer entries.deinit(allocator);
 
-    var fd_buf: [2048]ProcFdInfo = undefined;
+    // Reusable FD buffer, grown on demand so a process with many descriptors
+    // (databases, proxies, language servers) is never truncated.
+    var fd_buf = try allocator.alloc(ProcFdInfo, fd_initial_capacity);
+    defer allocator.free(fd_buf);
+
     var sfi: SocketFdInfo = undefined;
 
     for (pid_buf[0..n_pids]) |pid| {
         if (pid <= 0) continue;
 
-        // Get file descriptors for this PID.
-        const fd_bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, @ptrCast(&fd_buf), @intCast(@sizeOf(@TypeOf(fd_buf))));
+        // Size this PID's FD list, growing the shared buffer if needed.
+        const fd_needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, null, 0);
+        if (fd_needed <= 0) continue;
+        const fd_needed_count: usize = @intCast(@divTrunc(fd_needed, @sizeOf(ProcFdInfo)));
+        if (fd_needed_count + fd_query_headroom > fd_buf.len) {
+            fd_buf = try allocator.realloc(fd_buf, fd_needed_count + fd_query_headroom);
+        }
+
+        const fd_bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, @ptrCast(fd_buf.ptr), @intCast(fd_buf.len * @sizeOf(ProcFdInfo)));
         if (fd_bytes <= 0) continue;
-        const n_fds: usize = @intCast(@divTrunc(fd_bytes, @sizeOf(ProcFdInfo)));
+        const n_fds: usize = @min(@as(usize, @intCast(@divTrunc(fd_bytes, @sizeOf(ProcFdInfo)))), fd_buf.len);
 
         for (fd_buf[0..n_fds]) |fdi| {
             if (fdi.proc_fdtype != PROX_FDTYPE_SOCKET) continue;
@@ -200,26 +275,17 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
             const r = proc_pidfdinfo(pid, fdi.proc_fd, PROC_PIDFDSOCKETINFO, @ptrCast(&sfi), @intCast(@sizeOf(SocketFdInfo)));
             if (r < @sizeOf(SocketFdInfo)) continue;
 
-            const si = &sfi.psi;
-            if (si.soi_kind != SOCKINFO_TCP) continue;
-
-            const tcp = &si.soi_proto.pri_tcp;
-            if (tcp.tcpsi_state != TSI_S_LISTEN) continue;
-
-            // Convert port from network byte order.
-            const lport_bytes = std.mem.asBytes(&tcp.tcpsi_ini.insi_lport);
-            const port = std.mem.readInt(u16, lport_bytes[0..2], .big);
-            if (port == 0) continue;
+            const decoded = decodeListenSocket(&sfi) orelse continue;
 
             if (filter_port) |fp| {
-                if (port != fp) continue;
+                if (decoded.port != fp) continue;
             }
 
             // Deduplicate on (pid, port) to avoid IPv4+IPv6 double-listing.
             const pid_u32: u32 = @intCast(pid);
             var dup = false;
             for (entries.items) |existing| {
-                if (existing.pid == pid_u32 and existing.port == port) {
+                if (existing.pid == pid_u32 and existing.port == decoded.port) {
                     dup = true;
                     break;
                 }
@@ -227,13 +293,13 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
             if (dup) continue;
 
             var entry = PortEntry{
-                .port = port,
+                .port = decoded.port,
                 .pid = pid_u32,
                 .name = undefined,
                 .name_len = 0,
-                .addr4 = .{ 0, 0, 0, 0 },
-                .addr6 = .{0} ** 16,
-                .is_ipv6 = false,
+                .addr4 = decoded.addr4,
+                .addr6 = decoded.addr6,
+                .is_ipv6 = decoded.is_ipv6,
             };
 
             // Resolve process name.
@@ -242,17 +308,6 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
             if (nlen <= 0) {
                 entry.name[0] = '?';
                 entry.name_len = 1;
-            }
-
-            // Store address.
-            const ini = &tcp.tcpsi_ini;
-            if (ini.insi_vflag & INI_IPV4 != 0) {
-                const a = std.mem.asBytes(&ini.insi_laddr.in46.addr4);
-                @memcpy(&entry.addr4, a);
-            } else if (ini.insi_vflag & INI_IPV6 != 0) {
-                const a = std.mem.asBytes(&ini.insi_laddr.in6.words);
-                @memcpy(&entry.addr6, a);
-                entry.is_ipv6 = true;
             }
 
             try entries.append(allocator, entry);
@@ -268,4 +323,60 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     }.lt);
 
     return try entries.toOwnedSlice(allocator);
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+fn makeSocketFdInfo(kind: i32, state: i32, vflag: u8, port: u16) SocketFdInfo {
+    var sfi = std.mem.zeroes(SocketFdInfo);
+    sfi.psi.soi_kind = kind;
+    const tcp = &sfi.psi.soi_proto.pri_tcp;
+    tcp.tcpsi_state = state;
+    tcp.tcpsi_ini.insi_vflag = vflag;
+    const lport_bytes = std.mem.asBytes(&tcp.tcpsi_ini.insi_lport);
+    std.mem.writeInt(u16, lport_bytes[0..2], port, .big);
+    return sfi;
+}
+
+test "decodeListenSocket accepts a listening IPv4 TCP socket" {
+    var sfi = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV4, 3000);
+    @memcpy(
+        std.mem.asBytes(&sfi.psi.soi_proto.pri_tcp.tcpsi_ini.insi_laddr.in46.addr4),
+        &[_]u8{ 127, 0, 0, 1 },
+    );
+
+    const decoded = decodeListenSocket(&sfi) orelse return error.ExpectedDecode;
+    try std.testing.expectEqual(@as(u16, 3000), decoded.port);
+    try std.testing.expect(!decoded.is_ipv6);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, decoded.addr4);
+}
+
+test "decodeListenSocket accepts a listening IPv6 TCP socket" {
+    var sfi = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV6, 8080);
+    const addr = [_]u8{
+        0x20, 0x01, 0x0d, 0xb8,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    };
+    @memcpy(
+        std.mem.asBytes(&sfi.psi.soi_proto.pri_tcp.tcpsi_ini.insi_laddr.in6.words),
+        &addr,
+    );
+
+    const decoded = decodeListenSocket(&sfi) orelse return error.ExpectedDecode;
+    try std.testing.expectEqual(@as(u16, 8080), decoded.port);
+    try std.testing.expect(decoded.is_ipv6);
+    try std.testing.expectEqual(addr, decoded.addr6);
+}
+
+test "decodeListenSocket rejects non-TCP, non-listening, and port-zero sockets" {
+    const not_tcp = makeSocketFdInfo(SOCKINFO_TCP + 1, TSI_S_LISTEN, INI_IPV4, 3000);
+    try std.testing.expectEqual(@as(?DecodedListen, null), decodeListenSocket(&not_tcp));
+
+    const not_listening = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN + 1, INI_IPV4, 3000);
+    try std.testing.expectEqual(@as(?DecodedListen, null), decodeListenSocket(&not_listening));
+
+    const port_zero = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV4, 0);
+    try std.testing.expectEqual(@as(?DecodedListen, null), decodeListenSocket(&port_zero));
 }
