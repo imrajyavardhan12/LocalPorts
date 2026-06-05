@@ -4,6 +4,11 @@
 
 ### Added
 
+- Kill controls for multi-process ports. `--kill <port> --all` kills every
+  process on the port; `--kill <port> --pid <pid>` kills that pid only if it
+  is listening on the port; `--kill-pid <pid>` kills a process by explicit
+  PID. The default `--kill <port>` still refuses ambiguous multi-process
+  matches, and all kills require confirmation unless `--force` is given.
 - `--verbose` shows the owning user and full command line for each listener,
   in both table and JSON output. The command line is resolved via
   `KERN_PROCARGS2` and the user via `getpwuid`; fields that require ownership

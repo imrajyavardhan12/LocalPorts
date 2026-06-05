@@ -68,6 +68,48 @@ test "CLI parses kill mode and force" {
     try std.testing.expect(config.force_kill);
 }
 
+test "CLI parses kill controls" {
+    const all = [_][]const u8{ "localports", "--kill", "8000", "--all" };
+    const all_config = try expectConfig(cli.parseArgs(all[0..]));
+    try std.testing.expectEqual(cli.Action.kill, all_config.action);
+    try std.testing.expectEqual(@as(?u16, 8000), all_config.kill_port);
+    try std.testing.expect(all_config.kill_all);
+
+    const pid = [_][]const u8{ "localports", "--kill", "8000", "--pid", "6524" };
+    const pid_config = try expectConfig(cli.parseArgs(pid[0..]));
+    try std.testing.expectEqual(@as(?u16, 8000), pid_config.kill_port);
+    try std.testing.expectEqual(@as(?u32, 6524), pid_config.kill_match_pid);
+
+    const kill_pid = [_][]const u8{ "localports", "--kill-pid", "6524" };
+    const kill_pid_config = try expectConfig(cli.parseArgs(kill_pid[0..]));
+    try std.testing.expectEqual(cli.Action.kill, kill_pid_config.action);
+    try std.testing.expectEqual(@as(?u32, 6524), kill_pid_config.kill_pid);
+    try std.testing.expectEqual(@as(?u16, null), kill_pid_config.kill_port);
+}
+
+test "CLI rejects invalid kill-control combinations" {
+    const all_no_port = [_][]const u8{ "localports", "--all" };
+    _ = try expectFailure(.all_or_pid_requires_kill_port, cli.parseArgs(all_no_port[0..]));
+
+    const pid_no_port = [_][]const u8{ "localports", "--pid", "123" };
+    _ = try expectFailure(.all_or_pid_requires_kill_port, cli.parseArgs(pid_no_port[0..]));
+
+    const all_and_pid = [_][]const u8{ "localports", "--kill", "8000", "--all", "--pid", "123" };
+    _ = try expectFailure(.all_pid_conflict, cli.parseArgs(all_and_pid[0..]));
+
+    const kill_pid_and_kill = [_][]const u8{ "localports", "--kill-pid", "123", "--kill", "8000" };
+    _ = try expectFailure(.kill_pid_conflict, cli.parseArgs(kill_pid_and_kill[0..]));
+
+    const pid_missing_value = [_][]const u8{ "localports", "--kill", "8000", "--pid" };
+    _ = try expectFailure(.pid_requires_value, cli.parseArgs(pid_missing_value[0..]));
+
+    const kill_pid_missing_value = [_][]const u8{ "localports", "--kill-pid" };
+    _ = try expectFailure(.kill_pid_requires_value, cli.parseArgs(kill_pid_missing_value[0..]));
+
+    const bad_pid = [_][]const u8{ "localports", "--kill-pid", "abc" };
+    _ = try expectFailure(.invalid_pid_number, cli.parseArgs(bad_pid[0..]));
+}
+
 test "CLI parses verbose flag" {
     const defaults = [_][]const u8{"localports"};
     const default_config = try expectConfig(cli.parseArgs(defaults[0..]));
@@ -166,20 +208,46 @@ test "watch classification reports no changes for stable rows" {
     try std.testing.expectEqual(types.RowState.unchanged, classified[0].state);
 }
 
-test "kill target selection refuses ambiguous matches" {
+test "kill resolve single mode refuses ambiguous matches" {
     const none = [_]PortEntry{};
-    try std.testing.expectEqual(killcmd.TargetSelection.none, killcmd.selectTarget(none[0..]));
+    try std.testing.expectEqual(killcmd.KillResolution.none, killcmd.resolve(none[0..], .single));
 
     const one = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
-    const selected = killcmd.selectTarget(one[0..]);
-    try std.testing.expectEqual(@as(u32, 123), selected.target.pid);
+    const selected = killcmd.resolve(one[0..], .single);
+    try std.testing.expectEqual(@as(u32, 123), selected.one.pid);
 
     const multiple = [_]PortEntry{
         entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
         entryIPv4(3000, 456, "node", .{ 127, 0, 0, 1 }),
     };
-    const ambiguous = killcmd.selectTarget(multiple[0..]);
-    try std.testing.expectEqual(@as(usize, 2), ambiguous.multiple);
+    try std.testing.expectEqual(@as(usize, 2), killcmd.resolve(multiple[0..], .single).ambiguous);
+}
+
+test "kill resolve all mode targets every match" {
+    const none = [_]PortEntry{};
+    try std.testing.expectEqual(killcmd.KillResolution.none, killcmd.resolve(none[0..], .all));
+
+    const multiple = [_]PortEntry{
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv4(3000, 456, "node", .{ 127, 0, 0, 1 }),
+    };
+    try std.testing.expectEqual(@as(usize, 2), killcmd.resolve(multiple[0..], .all).many);
+}
+
+test "kill resolve pid mode selects matching pid or reports absence" {
+    const multiple = [_]PortEntry{
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv4(3000, 456, "ruby", .{ 127, 0, 0, 1 }),
+    };
+
+    const hit = killcmd.resolve(multiple[0..], .{ .pid = 456 });
+    try std.testing.expectEqual(@as(u32, 456), hit.one.pid);
+
+    const miss = killcmd.resolve(multiple[0..], .{ .pid = 999 });
+    try std.testing.expectEqual(@as(u32, 999), miss.pid_not_listed);
+
+    const empty = [_]PortEntry{};
+    try std.testing.expectEqual(killcmd.KillResolution.none, killcmd.resolve(empty[0..], .{ .pid = 123 }));
 }
 
 test "table output renders empty scans and IPv4 rows" {
