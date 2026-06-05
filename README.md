@@ -39,6 +39,7 @@ localports [port]
 localports --port, -p <port>
 localports --json
 localports --verbose
+localports --tree
 localports --watch, -w [seconds]
 localports --kill, -k <port> [--force]
 localports --kill <port> --all [--force]
@@ -58,6 +59,8 @@ Examples:
 ./zig-out/bin/localports --verbose
 ./zig-out/bin/localports -p 3000 --verbose
 ./zig-out/bin/localports --json --verbose
+./zig-out/bin/localports --tree
+./zig-out/bin/localports -p 3000 --tree --verbose
 ./zig-out/bin/localports --watch
 ./zig-out/bin/localports --watch 1
 ./zig-out/bin/localports 3000 --watch
@@ -133,6 +136,24 @@ PORT   PID    PROCESS  ADDRESS    USER  COMMAND
 
 The command line and (occasionally) the user come from per-process lookups that require ownership. For processes owned by other users, run with `sudo` to see the full command; otherwise those fields show `-`.
 
+## Process tree
+
+`--tree` shows each listener's parent-process chain, so you can tell whether a port is held by your dev server's worker, a stray process from a crashed run, or something launched by Docker:
+
+```bash
+localports --tree
+localports -p 3000 --tree --verbose
+```
+
+```text
+PORT   PID    PROCESS  ADDRESS
+3000   49729  node     127.0.0.1
+              └─ npm (49687)
+                └─ zsh (49600)
+```
+
+The chain runs from the immediate parent up toward `launchd` (pid 1), which is omitted. `--tree` composes with `--verbose`, and under `--json` it adds an `ancestors` array per row.
+
 ## JSON output
 
 The default `--json` shape is a stable contract. Each row always has these fields, and new fields are only added behind explicit flags so existing scripts keep working:
@@ -146,6 +167,13 @@ The default `--json` shape is a stable contract. Each row always has these field
 ```json
 { "port": 8000, "pid": 6524, "proto": "tcp", "process": "Python", "address": "127.0.0.1",
   "user": "rvs", "command": "python3 -m http.server 8000 --bind 127.0.0.1" }
+```
+
+`--json --tree` adds an `ancestors` array per row (immediate parent first):
+
+```json
+{ "port": 3000, "pid": 49729, "proto": "tcp", "process": "node", "address": "127.0.0.1",
+  "ancestors": [ { "pid": 49687, "name": "npm" }, { "pid": 49600, "name": "zsh" } ] }
 ```
 
 ## Example

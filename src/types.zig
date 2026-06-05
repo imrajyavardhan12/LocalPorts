@@ -11,6 +11,15 @@ pub const PortEntry = struct {
     // user's process without sudo). Backed by a caller-owned arena.
     user: ?[]const u8 = null,
     command: ?[]const u8 = null,
+    // Process ancestry (immediate parent first, up toward launchd), populated
+    // on demand by enrich under --tree. Null means not requested. Arena-backed.
+    ancestors: ?[]const Ancestor = null,
+};
+
+/// One link in a process's ancestry chain.
+pub const Ancestor = struct {
+    pid: u32,
+    name: []const u8,
 };
 
 pub const RowState = enum {

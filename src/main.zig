@@ -41,25 +41,29 @@ pub fn main(init: std.process.Init) !void {
     const entries = try doScan(allocator, config.filter_port);
     defer allocator.free(entries);
 
-    // Verbose fields (user, command) are arena-backed; one deinit frees them all.
-    var verbose_arena = std.heap.ArenaAllocator.init(allocator);
-    defer verbose_arena.deinit();
-    if (config.verbose) doEnrich(verbose_arena.allocator(), entries);
+    // Enriched fields (user/command/ancestors) are arena-backed; one deinit
+    // frees them all.
+    var enrich_arena = std.heap.ArenaAllocator.init(allocator);
+    defer enrich_arena.deinit();
+    if (config.verbose or config.tree) {
+        doEnrich(enrich_arena.allocator(), entries, config.verbose, config.tree);
+    }
 
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
     if (config.json_output) {
-        try output.writeJson(w, entries, config.verbose);
+        try output.writeJson(w, entries, opts);
     } else {
-        try output.writeTable(w, entries, config.verbose);
+        try output.writeTable(w, entries, opts);
     }
     try w.flush();
 }
 
-fn doEnrich(arena: std.mem.Allocator, entries: []PortEntry) void {
+fn doEnrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tree: bool) void {
     if (builtin.os.tag == .macos) {
-        @import("darwin.zig").enrich(arena, entries);
+        @import("darwin.zig").enrich(arena, entries, verbose, tree);
     }
 }
 
@@ -114,6 +118,7 @@ fn printHelp(io: std.Io) void {
         \\  --kill-pid <pid>    Kill a process by explicit PID
         \\  --force, -f         Skip confirmation for kills
         \\  --verbose           Show user and full command (scan only; use sudo for all)
+        \\  --tree              Show each listener's parent process chain (scan only)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
@@ -204,7 +209,7 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
             var out_buf: [65536]u8 = undefined;
             var file_writer = std.Io.File.stdout().writer(io, &out_buf);
             const w = &file_writer.interface;
-            try output.writeTable(w, entries, false);
+            try output.writeTable(w, entries, .{});
             try w.flush();
             std.process.exit(1);
         },
