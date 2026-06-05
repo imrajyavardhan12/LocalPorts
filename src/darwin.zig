@@ -185,6 +185,13 @@ pub fn processIsRunning(pid: u32) bool {
     return info.pbi_status != SZOMB;
 }
 
+/// Resolve a process name into `buf`, returning its length, or null if the
+/// pid has no resolvable name (gone, or not permitted).
+pub fn processName(pid: u32, buf: *[256]u8) ?usize {
+    const nlen = proc_name(@intCast(pid), @ptrCast(buf), buf.len);
+    return if (nlen > 0) @intCast(nlen) else null;
+}
+
 // ── Verbose enrichment (user + full command) ──────────────────────────────
 
 /// Populate the verbose-only fields (`user`, `command`) of each entry.

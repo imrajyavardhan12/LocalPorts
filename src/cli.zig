@@ -16,13 +16,24 @@ pub const Config = struct {
     kill_port: ?u16 = null,
     force_kill: bool = false,
     verbose: bool = false,
+    // Kill controls. `kill_all` and `kill_match_pid` refine `--kill <port>`;
+    // `kill_pid` is a standalone `--kill-pid <pid>` target.
+    kill_all: bool = false,
+    kill_match_pid: ?u32 = null,
+    kill_pid: ?u32 = null,
 };
 
 pub const ParseFailureKind = enum {
     port_requires_value,
     kill_requires_value,
+    pid_requires_value,
+    kill_pid_requires_value,
     invalid_port_number,
+    invalid_pid_number,
     watch_json_unsupported,
+    all_or_pid_requires_kill_port,
+    all_pid_conflict,
+    kill_pid_conflict,
     unknown_argument,
 };
 
@@ -66,6 +77,16 @@ pub fn parseArgs(args: anytype) ParseResult {
             config.kill_port = std.fmt.parseInt(u16, args[i], 10) catch return fail(.invalid_port_number, args[i]);
         } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
             config.force_kill = true;
+        } else if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "-a")) {
+            config.kill_all = true;
+        } else if (std.mem.eql(u8, arg, "--pid")) {
+            i += 1;
+            if (i >= args.len) return fail(.pid_requires_value, null);
+            config.kill_match_pid = std.fmt.parseInt(u32, args[i], 10) catch return fail(.invalid_pid_number, args[i]);
+        } else if (std.mem.eql(u8, arg, "--kill-pid")) {
+            i += 1;
+            if (i >= args.len) return fail(.kill_pid_requires_value, null);
+            config.kill_pid = std.fmt.parseInt(u32, args[i], 10) catch return fail(.invalid_pid_number, args[i]);
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
@@ -81,7 +102,22 @@ pub fn parseArgs(args: anytype) ParseResult {
         }
     }
 
-    if (config.kill_port != null) {
+    const port_kill = config.kill_port != null;
+    const direct_kill = config.kill_pid != null;
+
+    // --all and --pid both narrow a port kill but contradict each other.
+    if (config.kill_all and config.kill_match_pid != null)
+        return fail(.all_pid_conflict, null);
+
+    // --kill-pid is a standalone target; it cannot combine with port-kill flags.
+    if (direct_kill and (port_kill or config.kill_all or config.kill_match_pid != null))
+        return fail(.kill_pid_conflict, null);
+
+    // --all / --pid only make sense as refinements of --kill <port>.
+    if ((config.kill_all or config.kill_match_pid != null) and !port_kill)
+        return fail(.all_or_pid_requires_kill_port, null);
+
+    if (port_kill or direct_kill) {
         config.action = .kill;
     } else if (watch_seen) {
         if (config.json_output) return fail(.watch_json_unsupported, null);

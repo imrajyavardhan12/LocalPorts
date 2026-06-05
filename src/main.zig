@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         },
         .kill => {
-            try killHandler(allocator, config.kill_port.?, config.force_kill, init.io);
+            try killHandler(allocator, config, init.io);
             return;
         },
         .watch => {
@@ -82,8 +82,14 @@ fn fatalParse(failure: cli.ParseFailure) noreturn {
     switch (failure.kind) {
         .port_requires_value => fatal("--port requires a value"),
         .kill_requires_value => fatal("--kill requires a value"),
+        .pid_requires_value => fatal("--pid requires a value"),
+        .kill_pid_requires_value => fatal("--kill-pid requires a value"),
         .invalid_port_number => fatal("invalid port number"),
+        .invalid_pid_number => fatal("invalid pid number"),
         .watch_json_unsupported => fatal("--json cannot be used with --watch"),
+        .all_or_pid_requires_kill_port => fatal("--all and --pid require --kill <port>"),
+        .all_pid_conflict => fatal("--all cannot be combined with --pid"),
+        .kill_pid_conflict => fatal("--kill-pid cannot be combined with --kill, --all, or --pid"),
         .unknown_argument => {
             std.debug.print("error: unknown argument: {s}\n", .{failure.arg.?});
             std.process.exit(1);
@@ -103,7 +109,10 @@ fn printHelp(io: std.Io) void {
         \\  --json             Output as JSON
         \\  --watch, -w [secs]  Watch mode (default 2 seconds)
         \\  --kill, -k <port>   Kill process on port (refuses ambiguous matches)
-        \\  --force, -f         Skip confirmation for --kill
+        \\  --all, -a           With --kill <port>: kill all matching processes
+        \\  --pid <pid>         With --kill <port>: kill only that pid if on the port
+        \\  --kill-pid <pid>    Kill a process by explicit PID
+        \\  --force, -f         Skip confirmation for kills
         \\  --verbose           Show user and full command (scan only; use sudo for all)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
@@ -118,6 +127,9 @@ fn printHelp(io: std.Io) void {
         \\  localports 3000 --watch
         \\  localports --kill 3000
         \\  localports --kill 3000 --force
+        \\  localports --kill 8000 --all
+        \\  localports --kill 8000 --pid 6524
+        \\  localports --kill-pid 6524
         \\
         \\Note: run with sudo to see all processes.
         \\
@@ -164,54 +176,117 @@ fn watchLoop(allocator: std.mem.Allocator, interval_secs: u32, filter_port: ?u16
     }
 }
 
-fn killHandler(allocator: std.mem.Allocator, port: u16, force: bool, io: std.Io) !void {
+fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void {
+    // Standalone --kill-pid <pid>: kill by explicit PID, no port lookup.
+    if (config.kill_pid) |pid| {
+        try killByPid(pid, config.force_kill, io);
+        return;
+    }
+
+    const port = config.kill_port.?;
     const entries = try doScan(allocator, port);
     defer allocator.free(entries);
 
-    const entry = switch (killcmd.selectTarget(entries)) {
+    const mode: killcmd.KillMode = if (config.kill_all)
+        .all
+    else if (config.kill_match_pid) |p|
+        .{ .pid = p }
+    else
+        .single;
+
+    switch (killcmd.resolve(entries, mode)) {
         .none => {
             std.debug.print("No process found listening on port {d}.\n", .{port});
             std.process.exit(1);
         },
-        .multiple => |count| {
-            std.debug.print("Multiple processes ({d}) found listening on port {d}; refusing to choose one automatically.\n", .{ count, port });
-
+        .ambiguous => |count| {
+            std.debug.print("Multiple processes ({d}) found listening on port {d}; refusing to choose one automatically. Use --all to kill all, or --pid <pid> to choose.\n", .{ count, port });
             var out_buf: [65536]u8 = undefined;
             var file_writer = std.Io.File.stdout().writer(io, &out_buf);
             const w = &file_writer.interface;
             try output.writeTable(w, entries, false);
             try w.flush();
-
             std.process.exit(1);
         },
-        .target => |entry| entry,
-    };
-    const pid: std.posix.pid_t = @intCast(entry.pid);
+        .pid_not_listed => |p| {
+            std.debug.print("PID {d} is not listening on port {d}.\n", .{ p, port });
+            std.process.exit(1);
+        },
+        .one => |entry| {
+            const name = entry.name[0..entry.name_len];
+            if (!config.force_kill) {
+                std.debug.print("Kill process {s} (PID {d}) on port {d}? [y/N] ", .{ name, entry.pid, port });
+                if (!confirmYes()) std.process.exit(2);
+            }
+            const result = try terminate(entry.pid, io);
+            reportTerminate(result, name, entry.pid);
+            if (!terminateSucceeded(result)) std.process.exit(1);
+        },
+        .many => {
+            if (!config.force_kill) {
+                std.debug.print("Kill all {d} processes on port {d}? [y/N] ", .{ entries.len, port });
+                if (!confirmYes()) std.process.exit(2);
+            }
+            var any_failed = false;
+            for (entries) |entry| {
+                const result = try terminate(entry.pid, io);
+                reportTerminate(result, entry.name[0..entry.name_len], entry.pid);
+                if (!terminateSucceeded(result)) any_failed = true;
+            }
+            if (any_failed) std.process.exit(1);
+        },
+    }
+}
 
-    if (!force) {
-        const name = entry.name[0..entry.name_len];
-        std.debug.print("Kill process {s} (PID {d}) on port {d}? [y/N] ", .{ name, entry.pid, port });
-        var stdin_buf: [1]u8 = undefined;
-        const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &stdin_buf) catch 0;
-        const confirm = if (bytes_read > 0) stdin_buf[0] else 'n';
-        std.debug.print("\n", .{});
-        if (confirm != 'y' and confirm != 'Y') {
-            std.process.exit(2);
-        }
+fn killByPid(pid: u32, force: bool, io: std.Io) !void {
+    // Guard the u32 -> pid_t boundary: a pid that overflows pid_t would wrap
+    // negative, and kill() with a negative pid signals a process group. Refuse.
+    if (pid == 0 or pid > std.math.maxInt(std.posix.pid_t)) {
+        std.debug.print("error: invalid pid {d}.\n", .{pid});
+        std.process.exit(1);
     }
 
-    // Best-effort: PID may be recycled between scan and signal; macOS does not
-    // provide a pidfd-style handle here, so this CLI accepts that inherent race.
-    std.posix.kill(pid, std.posix.SIG.TERM) catch |e| {
-        if (e == error.PermissionDenied) {
-            std.debug.print("error: permission denied. Try running with sudo.\n", .{});
-        } else {
-            std.debug.print("error: failed to send signal: {}\n", .{e});
-        }
+    if (!processExists(@intCast(pid))) {
+        std.debug.print("No process with PID {d}.\n", .{pid});
         std.process.exit(1);
+    }
+
+    var name_buf: [256]u8 = undefined;
+    const name = doProcessName(pid, &name_buf) orelse "?";
+
+    if (!force) {
+        std.debug.print("Kill process {s} (PID {d})? [y/N] ", .{ name, pid });
+        if (!confirmYes()) std.process.exit(2);
+    }
+
+    const result = try terminate(pid, io);
+    reportTerminate(result, name, pid);
+    if (!terminateSucceeded(result)) std.process.exit(1);
+}
+
+const TerminateResult = enum { killed, already_gone, permission_denied, signal_failed, still_running };
+
+fn terminateSucceeded(result: TerminateResult) bool {
+    return result == .killed or result == .already_gone;
+}
+
+/// Send SIGTERM, wait up to 5s, then escalate to SIGKILL and verify the
+/// process is gone. PID may be recycled between scan and signal; macOS does
+/// not offer a pidfd-style handle, so this CLI accepts that inherent race.
+/// A process that is already gone counts as success — important for --all,
+/// where killing one listener (e.g. a server master) can make its workers
+/// exit before the loop reaches them.
+fn terminate(pid_u32: u32, io: std.Io) !TerminateResult {
+    const pid: std.posix.pid_t = @intCast(pid_u32);
+
+    std.posix.kill(pid, std.posix.SIG.TERM) catch |e| {
+        return switch (e) {
+            error.ProcessNotFound => .already_gone,
+            error.PermissionDenied => .permission_denied,
+            else => .signal_failed,
+        };
     };
 
-    // Wait up to 5 seconds for process to exit via SIGTERM.
     var exited = false;
     for (0..50) |_| {
         try std.Io.sleep(io, .fromMilliseconds(100), .awake);
@@ -223,23 +298,40 @@ fn killHandler(allocator: std.mem.Allocator, port: u16, force: bool, io: std.Io)
 
     if (!exited) {
         std.posix.kill(pid, std.posix.SIG.KILL) catch |e| {
-            std.debug.print("error: failed to send SIGKILL: {}\n", .{e});
-            std.process.exit(1);
+            if (e == error.ProcessNotFound) return .killed;
+            return .signal_failed;
         };
-
         for (0..10) |_| {
             try std.Io.sleep(io, .fromMilliseconds(100), .awake);
             if (!processExists(pid)) break;
         }
     }
 
-    const name = entry.name[0..entry.name_len];
-    if (processExists(pid)) {
-        std.debug.print("error: process {s} (PID {d}) still appears to be running after SIGKILL.\n", .{ name, entry.pid });
-        std.process.exit(1);
-    }
+    return if (processExists(pid)) .still_running else .killed;
+}
 
-    std.debug.print("Killed {s} (PID {d})\n", .{ name, entry.pid });
+fn reportTerminate(result: TerminateResult, name: []const u8, pid: u32) void {
+    switch (result) {
+        .killed => std.debug.print("Killed {s} (PID {d})\n", .{ name, pid }),
+        .already_gone => std.debug.print("{s} (PID {d}) is already gone.\n", .{ name, pid }),
+        .permission_denied => std.debug.print("error: permission denied for {s} (PID {d}). Try running with sudo.\n", .{ name, pid }),
+        .signal_failed => std.debug.print("error: failed to signal {s} (PID {d}).\n", .{ name, pid }),
+        .still_running => std.debug.print("error: {s} (PID {d}) still appears to be running after SIGKILL.\n", .{ name, pid }),
+    }
+}
+
+fn confirmYes() bool {
+    var stdin_buf: [1]u8 = undefined;
+    const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &stdin_buf) catch 0;
+    std.debug.print("\n", .{});
+    return bytes_read > 0 and (stdin_buf[0] == 'y' or stdin_buf[0] == 'Y');
+}
+
+fn doProcessName(pid: u32, buf: *[256]u8) ?[]const u8 {
+    if (builtin.os.tag == .macos) {
+        if (@import("darwin.zig").processName(pid, buf)) |len| return buf[0..len];
+    }
+    return null;
 }
 
 fn processExists(pid: std.posix.pid_t) bool {

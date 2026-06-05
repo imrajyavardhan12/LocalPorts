@@ -41,6 +41,9 @@ localports --json
 localports --verbose
 localports --watch, -w [seconds]
 localports --kill, -k <port> [--force]
+localports --kill <port> --all [--force]
+localports --kill <port> --pid <pid> [--force]
+localports --kill-pid <pid> [--force]
 localports --help, -h
 localports --version, -v
 ```
@@ -60,6 +63,9 @@ Examples:
 ./zig-out/bin/localports 3000 --watch
 ./zig-out/bin/localports --kill 3000
 ./zig-out/bin/localports --kill 3000 --force
+./zig-out/bin/localports --kill 8000 --all
+./zig-out/bin/localports --kill 8000 --pid 6524
+./zig-out/bin/localports --kill-pid 6524
 ```
 
 Run with `sudo` to see all system processes:
@@ -91,16 +97,24 @@ Rows are color-coded:
 Kill mode finds the process listening on a port, asks for confirmation, sends `SIGTERM`, waits up to 5 seconds, then escalates to `SIGKILL` if the process is still alive.
 
 ```bash
-localports --kill 3000
-localports --kill 3000 --force
+localports --kill 3000              # the sole listener on the port
+localports --kill 3000 --force      # skip confirmation
+localports --kill 8000 --all        # every process on the port
+localports --kill 8000 --pid 6524   # one pid, only if it is on the port
+localports --kill-pid 6524          # a process by explicit PID, any port
 ```
+
+When a port has more than one listener, plain `--kill <port>` refuses to choose. Use `--all` to kill them all, or `--pid <pid>` to select one. `--kill-pid <pid>` targets a PID directly without a port lookup.
 
 Safety behavior:
 
 - If no process is found, exits with code `1`.
-- If multiple processes are listening on the same port, `localports` refuses to choose one automatically, prints the matching rows, and exits with code `1`.
+- If multiple processes are listening on the same port, plain `--kill <port>` refuses to choose one automatically, prints the matching rows, and exits with code `1`. Use `--all` or `--pid <pid>` to act intentionally.
+- `--kill <port> --pid <pid>` exits with code `1` if that pid is not listening on the port.
+- `--all` and `--pid` require `--kill <port>`; `--kill-pid` cannot be combined with `--kill`/`--all`/`--pid`. Invalid combinations exit with code `1`.
+- With `--all`, every matching process is attempted; the command exits non-zero if any kill fails.
 - If permission is denied, exits with code `1` and suggests `sudo`.
-- If the confirmation prompt is declined, exits with code `2`.
+- If a confirmation prompt is declined, exits with code `2`.
 
 ## Verbose mode
 
