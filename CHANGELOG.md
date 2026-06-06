@@ -8,6 +8,13 @@
   entries to a hash-set lookup while preserving the existing `(port, pid)`
   behavior.
 
+### Fixed
+
+- Port-based kill commands now refuse Docker host-process targets so
+  `localports --kill <port>` does not accidentally kill Docker Desktop instead
+  of the container publishing the port. The message suggests `docker stop` when
+  the container can be resolved.
+
 ## 0.5.0 - 2026-06-06
 
 ### Added

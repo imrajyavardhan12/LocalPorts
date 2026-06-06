@@ -266,6 +266,42 @@ test "kill resolve pid mode selects matching pid or reports absence" {
     try std.testing.expectEqual(killcmd.KillResolution.none, killcmd.resolve(empty[0..], .{ .pid = 123 }));
 }
 
+test "kill safety refuses Docker-owned single target" {
+    const entries = [_]PortEntry{entryIPv4(5432, 900, "com.docker.backend", .{ 127, 0, 0, 1 })};
+    const resolution = killcmd.resolve(entries[0..], .single);
+
+    const target = killcmd.unsafeDockerPortKillTarget(entries[0..], resolution) orelse return error.ExpectedDockerRefusal;
+    try std.testing.expectEqual(@as(u32, 900), target.pid);
+    try std.testing.expectEqual(@as(u16, 5432), target.port);
+}
+
+test "kill safety refuses all mode when any target is Docker-owned" {
+    const entries = [_]PortEntry{
+        entryIPv4(5432, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv4(5432, 900, "com.docker.backend", .{ 127, 0, 0, 1 }),
+    };
+    const resolution = killcmd.resolve(entries[0..], .all);
+
+    const target = killcmd.unsafeDockerPortKillTarget(entries[0..], resolution) orelse return error.ExpectedDockerRefusal;
+    try std.testing.expectEqual(@as(u32, 900), target.pid);
+}
+
+test "kill safety applies to selected Docker pid but not ambiguous non-action" {
+    const entries = [_]PortEntry{
+        entryIPv4(5432, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv4(5432, 900, "com.docker.backend", .{ 127, 0, 0, 1 }),
+    };
+
+    const selected = killcmd.resolve(entries[0..], .{ .pid = 900 });
+    try std.testing.expectEqual(@as(u32, 900), (killcmd.unsafeDockerPortKillTarget(entries[0..], selected) orelse return error.ExpectedDockerRefusal).pid);
+
+    const ambiguous = killcmd.resolve(entries[0..], .single);
+    try std.testing.expect(killcmd.unsafeDockerPortKillTarget(entries[0..], ambiguous) == null);
+
+    const node = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    try std.testing.expect(killcmd.unsafeDockerPortKillTarget(node[0..], killcmd.resolve(node[0..], .single)) == null);
+}
+
 test "table output renders empty scans and IPv4 rows" {
     var empty_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer empty_writer.deinit();
