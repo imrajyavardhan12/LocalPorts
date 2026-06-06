@@ -1,0 +1,17 @@
+#compdef localports
+
+_arguments -s -S \
+  '(-p --port)'{-p,--port}'[Filter by port number]:port:_guard "[0-9]#" port' \
+  '--json[Output as JSON]' \
+  '(-w --watch)'{-w,--watch}'[Watch mode (default 2 seconds)]::seconds:_guard "[0-9]#" seconds' \
+  '(-k --kill)'{-k,--kill}'[Kill process on port]:port:_guard "[0-9]#" port' \
+  '(-a --all)'{-a,--all}'[With --kill <port>: kill all matching processes]' \
+  '--pid[With --kill <port>: kill only this PID if it is on the port]:pid:_pids' \
+  '--kill-pid[Kill a process by explicit PID]:pid:_pids' \
+  '(-f --force)'{-f,--force}'[Skip kill confirmation]' \
+  '--verbose[Show owning user and full command]' \
+  '--tree[Show each listener parent-process chain]' \
+  '--docker[Resolve Docker-owned ports to their container]' \
+  '(-v --version)'{-v,--version}'[Show version]' \
+  '(-h --help)'{-h,--help}'[Show help]' \
+  ':port or command:(version)'

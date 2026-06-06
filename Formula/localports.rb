@@ -10,6 +10,10 @@ class Localports < Formula
   def install
     system "zig", "build", "-Doptimize=ReleaseFast"
     bin.install "zig-out/bin/localports"
+    man1.install "man/localports.1"
+    bash_completion.install "completions/localports.bash" => "localports"
+    zsh_completion.install "completions/_localports"
+    fish_completion.install "completions/localports.fish"
   end
 
   test do
