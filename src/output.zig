@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const PortEntry = types.PortEntry;
 const Ancestor = types.Ancestor;
+const Container = types.Container;
 const WatchEntry = types.WatchEntry;
 const RowState = types.RowState;
 
@@ -17,7 +18,42 @@ pub const ansi = struct {
 pub const Options = struct {
     verbose: bool = false,
     tree: bool = false,
+    docker: bool = false,
 };
+
+/// The variable columns that follow the fixed PORT/PID prefix. PROCESS and
+/// ADDRESS are always present; USER/COMMAND come with --verbose and CONTAINER
+/// with --docker. COMMAND is kept last (it can be very long) so it never needs
+/// padding; every other column is padded to its width.
+const Column = enum { process, address, user, container, command };
+
+fn columnHeader(col: Column) []const u8 {
+    return switch (col) {
+        .process => "PROCESS",
+        .address => "ADDRESS",
+        .user => "USER",
+        .container => "CONTAINER",
+        .command => "COMMAND",
+    };
+}
+
+/// Render a column's cell for `e` into `buf` (used for ADDRESS and CONTAINER);
+/// other cells borrow existing slices. The returned slice is valid until the
+/// next call that reuses `buf`.
+fn columnCell(col: Column, e: *const PortEntry, buf: []u8) []const u8 {
+    return switch (col) {
+        .process => e.name[0..e.name_len],
+        .address => formatAddr(buf, e),
+        .user => e.user orelse "-",
+        .command => e.command orelse "-",
+        .container => formatContainer(buf, e.container),
+    };
+}
+
+fn formatContainer(buf: []u8, container: ?Container) []const u8 {
+    const c = container orelse return "-";
+    return std.fmt.bufPrint(buf, "{s} ({s} ->{d})", .{ c.name, c.image, c.container_port }) catch "-";
+}
 
 pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !void {
     if (entries.len == 0) {
@@ -25,53 +61,63 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !v
         return;
     }
 
-    // Compute PROCESS column width (min 7 for header, +2 for spacing).
-    var proc_col: usize = 9;
-    for (entries) |e| {
-        if (e.name_len + 2 > proc_col) proc_col = e.name_len + 2;
+    // Assemble the column list. COMMAND stays last; CONTAINER sits before it.
+    var cols: [5]Column = undefined;
+    var n: usize = 0;
+    cols[n] = .process;
+    n += 1;
+    cols[n] = .address;
+    n += 1;
+    if (opts.verbose) {
+        cols[n] = .user;
+        n += 1;
     }
+    if (opts.docker) {
+        cols[n] = .container;
+        n += 1;
+    }
+    if (opts.verbose) {
+        cols[n] = .command;
+        n += 1;
+    }
+    const columns = cols[0..n];
+    const last = n - 1;
 
-    if (!opts.verbose) {
-        // Header row.
-        try writer.print("PORT   PID    ", .{});
-        try padWrite(writer, "PROCESS", proc_col);
-        try writer.writeAll("ADDRESS\n");
-
+    // Compute padded widths for every column except the last (rendered raw).
+    var cell_buf: [1024]u8 = undefined;
+    var widths: [5]usize = .{0} ** 5;
+    for (columns, 0..) |col, ci| {
+        if (ci == last) break;
+        var w: usize = columnHeader(col).len + 2;
         for (entries) |e| {
-            const name = e.name[0..e.name_len];
-            try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
-            try padWrite(writer, name, proc_col);
-            try writeAddrStr(writer, &e);
-            try writer.writeByte('\n');
-            if (opts.tree) try writeAncestors(writer, e.ancestors);
+            const len = columnCell(col, &e, &cell_buf).len;
+            if (len + 2 > w) w = len + 2;
         }
-        return;
+        widths[ci] = w;
     }
 
-    // Verbose: ADDRESS and USER also need padding (COMMAND is last).
-    var addr_buf: [46]u8 = undefined;
-    var addr_col: usize = 9; // "ADDRESS" + 2
-    var user_col: usize = 6; // "USER" + 2
-    for (entries) |e| {
-        const addr_len = formatAddr(&addr_buf, &e).len;
-        if (addr_len + 2 > addr_col) addr_col = addr_len + 2;
-        const user: []const u8 = e.user orelse "-";
-        if (user.len + 2 > user_col) user_col = user.len + 2;
-    }
-
+    // Header.
     try writer.print("PORT   PID    ", .{});
-    try padWrite(writer, "PROCESS", proc_col);
-    try padWrite(writer, "ADDRESS", addr_col);
-    try padWrite(writer, "USER", user_col);
-    try writer.writeAll("COMMAND\n");
+    for (columns, 0..) |col, ci| {
+        if (ci == last) {
+            try writer.writeAll(columnHeader(col));
+        } else {
+            try padWrite(writer, columnHeader(col), widths[ci]);
+        }
+    }
+    try writer.writeByte('\n');
 
+    // Rows.
     for (entries) |e| {
-        const name = e.name[0..e.name_len];
         try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
-        try padWrite(writer, name, proc_col);
-        try padWrite(writer, formatAddr(&addr_buf, &e), addr_col);
-        try padWrite(writer, e.user orelse "-", user_col);
-        try writer.writeAll(e.command orelse "-");
+        for (columns, 0..) |col, ci| {
+            const text = columnCell(col, &e, &cell_buf);
+            if (ci == last) {
+                try writer.writeAll(text);
+            } else {
+                try padWrite(writer, text, widths[ci]);
+            }
+        }
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
@@ -94,6 +140,17 @@ pub fn writeJson(writer: anytype, entries: []const PortEntry, opts: Options) !vo
             try writer.writeAll("\",\"command\":\"");
             try writeJsonEscaped(writer, e.command orelse "");
             try writer.writeByte('"');
+        }
+        if (opts.docker) {
+            if (e.container) |c| {
+                try writer.writeAll(",\"container\":{\"name\":\"");
+                try writeJsonEscaped(writer, c.name);
+                try writer.writeAll("\",\"image\":\"");
+                try writeJsonEscaped(writer, c.image);
+                try writer.print("\",\"container_port\":{d}}}", .{c.container_port});
+            } else {
+                try writer.writeAll(",\"container\":null");
+            }
         }
         if (opts.tree) {
             try writer.writeAll(",\"ancestors\":[");

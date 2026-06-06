@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const cli = @import("cli.zig");
 const output = @import("output.zig");
 const killcmd = @import("kill.zig");
+const docker = @import("docker.zig");
 const types = @import("types.zig");
 const watch = @import("watch.zig");
 
@@ -455,6 +456,97 @@ test "default output omits ancestors" {
     try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "ancestors") == null);
+}
+
+test "CLI parses docker flag" {
+    const defaults = [_][]const u8{"localports"};
+    try std.testing.expect(!(try expectConfig(cli.parseArgs(defaults[0..]))).docker);
+
+    const argv = [_][]const u8{ "localports", "--docker" };
+    const config = try expectConfig(cli.parseArgs(argv[0..]));
+    try std.testing.expectEqual(cli.Action.scan, config.action);
+    try std.testing.expect(config.docker);
+}
+
+test "docker isDockerProcess recognizes the Docker host processes" {
+    try std.testing.expect(docker.isDockerProcess("com.docker.backend"));
+    try std.testing.expect(docker.isDockerProcess("docker-proxy"));
+    try std.testing.expect(docker.isDockerProcess("vpnkit"));
+    try std.testing.expect(!docker.isDockerProcess("node"));
+    try std.testing.expect(!docker.isDockerProcess("Python"));
+}
+
+test "docker parsePsOutput maps host ports to containers" {
+    const text =
+        "lp-spike\tnginx:alpine\t0.0.0.0:18080->80/tcp, [::]:18080->80/tcp\n" ++
+        "db\tpostgres:16\t0.0.0.0:5432->5432/tcp\n" ++
+        "idle\tredis:7\t\n"; // running but no published ports
+
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+
+    const c1 = docker.lookup(mappings, 18080) orelse return error.Missing18080;
+    try std.testing.expectEqualStrings("lp-spike", c1.name);
+    try std.testing.expectEqualStrings("nginx:alpine", c1.image);
+    try std.testing.expectEqual(@as(u16, 80), c1.container_port);
+
+    const c2 = docker.lookup(mappings, 5432) orelse return error.Missing5432;
+    try std.testing.expectEqualStrings("db", c2.name);
+    try std.testing.expectEqual(@as(u16, 5432), c2.container_port);
+
+    try std.testing.expect(docker.lookup(mappings, 9999) == null);
+}
+
+test "docker parsePsOutput skips exposed-but-unpublished ports" {
+    const text = "x\timg\t80/tcp, 443/tcp\n"; // exposed, not published (no ->)
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+    try std.testing.expectEqual(@as(usize, 0), mappings.len);
+}
+
+test "docker table renders the CONTAINER column" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(5432, 9743, "com.docker.backend", .{ 127, 0, 0, 1 })};
+    entries[0].container = .{ .name = "pg-dev", .image = "postgres:16", .container_port = 5432 };
+    try output.writeTable(&writer.writer, entries[0..], .{ .docker = true });
+
+    try std.testing.expectEqualStrings(
+        "PORT   PID    PROCESS" ++ (" " ** 13) ++ "ADDRESS" ++ (" " ** 4) ++ "CONTAINER\n" ++
+            "5432   9743   com.docker.backend  127.0.0.1  pg-dev (postgres:16 ->5432)\n",
+        writer.written(),
+    );
+}
+
+test "docker JSON adds a container object, or null when unresolved" {
+    var resolved: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer resolved.deinit();
+    var entries = [_]PortEntry{entryIPv4(5432, 9743, "com.docker.backend", .{ 127, 0, 0, 1 })};
+    entries[0].container = .{ .name = "pg-dev", .image = "postgres:16", .container_port = 5432 };
+    try output.writeJson(&resolved.writer, entries[0..], .{ .docker = true });
+    try std.testing.expectEqualStrings(
+        "[\n  {\"port\":5432,\"pid\":9743,\"proto\":\"tcp\",\"process\":\"com.docker.backend\"," ++
+            "\"address\":\"127.0.0.1\",\"container\":{\"name\":\"pg-dev\",\"image\":\"postgres:16\",\"container_port\":5432}}\n]\n",
+        resolved.written(),
+    );
+
+    var unresolved: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer unresolved.deinit();
+    const plain = [_]PortEntry{entryIPv4(5432, 9743, "com.docker.backend", .{ 127, 0, 0, 1 })};
+    try output.writeJson(&unresolved.writer, plain[0..], .{ .docker = true });
+    try std.testing.expect(std.mem.indexOf(u8, unresolved.written(), "\"container\":null") != null);
+}
+
+test "default output omits the container field" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(5432, 9743, "com.docker.backend", .{ 127, 0, 0, 1 })};
+    entries[0].container = .{ .name = "pg-dev", .image = "postgres:16", .container_port = 5432 };
+    try output.writeJson(&writer.writer, entries[0..], .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "container") == null);
 }
 
 fn expectConfig(result: cli.ParseResult) !cli.Config {
