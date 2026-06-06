@@ -376,6 +376,9 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     var entries: std.ArrayList(PortEntry) = .empty;
     errdefer entries.deinit(allocator);
 
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer seen.deinit(allocator);
+
     // Reusable FD buffer, grown on demand so a process with many descriptors
     // (databases, proxies, language servers) is never truncated.
     var fd_buf = try allocator.alloc(ProcFdInfo, fd_initial_capacity);
@@ -412,14 +415,10 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
 
             // Deduplicate on (pid, port) to avoid IPv4+IPv6 double-listing.
             const pid_u32: u32 = @intCast(pid);
-            var dup = false;
-            for (entries.items) |existing| {
-                if (existing.pid == pid_u32 and existing.port == decoded.port) {
-                    dup = true;
-                    break;
-                }
-            }
-            if (dup) continue;
+            const key = types.portPidKey(decoded.port, pid_u32);
+            const seen_entry = try seen.getOrPut(allocator, key);
+            if (seen_entry.found_existing) continue;
+            seen_entry.value_ptr.* = {};
 
             var entry = PortEntry{
                 .port = decoded.port,
