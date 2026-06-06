@@ -1,3 +1,4 @@
+const docker = @import("docker.zig");
 const types = @import("types.zig");
 const PortEntry = types.PortEntry;
 
@@ -41,4 +42,26 @@ pub fn resolve(entries: []const PortEntry, mode: KillMode) KillResolution {
             return .{ .pid_not_listed = pid };
         },
     }
+}
+
+/// Return a Docker-owned listener that a port-kill action would target, if any.
+/// Port-based kills refuse these targets because killing Docker Desktop's host
+/// networking process can affect Docker itself, not just the publishing
+/// container. Standalone `--kill-pid` does not use this guard because the user
+/// explicitly named a PID.
+pub fn unsafeDockerPortKillTarget(entries: []const PortEntry, resolution: KillResolution) ?PortEntry {
+    return switch (resolution) {
+        .one => |entry| if (isDockerEntry(entry)) entry else null,
+        .many => {
+            for (entries) |entry| {
+                if (isDockerEntry(entry)) return entry;
+            }
+            return null;
+        },
+        .none, .ambiguous, .pid_not_listed => null,
+    };
+}
+
+fn isDockerEntry(entry: PortEntry) bool {
+    return docker.isDockerProcess(entry.name[0..entry.name_len]);
 }

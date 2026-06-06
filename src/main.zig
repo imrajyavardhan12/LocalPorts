@@ -203,7 +203,12 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
     else
         .single;
 
-    switch (killcmd.resolve(entries, mode)) {
+    const resolution = killcmd.resolve(entries, mode);
+    if (killcmd.unsafeDockerPortKillTarget(entries, resolution)) |target| {
+        try refuseDockerPortKill(allocator, entries, target, port, io);
+    }
+
+    switch (resolution) {
         .none => {
             std.debug.print("No process found listening on port {d}.\n", .{port});
             std.process.exit(1);
@@ -245,6 +250,34 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
             if (any_failed) std.process.exit(1);
         },
     }
+}
+
+fn refuseDockerPortKill(allocator: std.mem.Allocator, entries: []PortEntry, target: PortEntry, port: u16, io: std.Io) !noreturn {
+    var enrich_arena = std.heap.ArenaAllocator.init(allocator);
+    defer enrich_arena.deinit();
+    @import("docker.zig").enrich(enrich_arena.allocator(), entries, io);
+
+    const enriched = findEntry(entries, target.port, target.pid) orelse &target;
+    const name = enriched.name[0..enriched.name_len];
+
+    std.debug.print("Port {d} is owned by a Docker host process ({s}, PID {d}).\n", .{ port, name, enriched.pid });
+    std.debug.print("Killing it would affect Docker itself, not just the container publishing this port.\n", .{});
+
+    if (enriched.container) |container| {
+        std.debug.print("\nContainer: {s} ({s} ->{d})\n", .{ container.name, container.image, container.container_port });
+        std.debug.print("Safer action:\n  docker stop {s}\n", .{container.name});
+    } else {
+        std.debug.print("\nSafer action:\n  localports {d} --docker\n  docker ps\n", .{port});
+    }
+
+    std.process.exit(1);
+}
+
+fn findEntry(entries: []const PortEntry, port: u16, pid: u32) ?*const PortEntry {
+    for (entries) |*entry| {
+        if (entry.port == port and entry.pid == pid) return entry;
+    }
+    return null;
 }
 
 fn killByPid(pid: u32, force: bool, io: std.Io) !void {

@@ -173,6 +173,7 @@ Safety behavior:
 
 - If no process is found, exits with code `1`.
 - If multiple processes are listening on the same port, plain `--kill <port>` refuses to choose one automatically, prints the matching rows, and exits with code `1`. Use `--all` or `--pid <pid>` to act intentionally.
+- If a port-based kill would target a Docker host process, it refuses so you don't accidentally kill Docker Desktop instead of the container publishing the port. Use `localports <port> --docker` or `docker ps`, then stop the container intentionally.
 - `--kill <port> --pid <pid>` exits with code `1` if that pid is not listening on the port.
 - `--all` and `--pid` require `--kill <port>`; `--kill-pid` cannot be combined with `--kill` / `--all` / `--pid`. Invalid combinations exit with code `1`.
 - With `--all`, every matching process is attempted; the command exits non-zero if any kill fails. A process that has already exited counts as success.

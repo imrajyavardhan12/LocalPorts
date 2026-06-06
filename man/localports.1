@@ -55,6 +55,8 @@ Watch mode is table-only.
 Kill the process listening on
 .Ar port .
 If more than one process matches, refuse to choose automatically.
+If the selected listener is a Docker host process, refuse so Docker Desktop is
+not killed in place of the publishing container.
 .It Fl a , Fl -all
 With
 .Fl -kill Ar port ,
