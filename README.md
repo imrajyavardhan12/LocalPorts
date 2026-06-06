@@ -40,6 +40,7 @@ localports --port, -p <port>
 localports --json
 localports --verbose
 localports --tree
+localports --docker
 localports --watch, -w [seconds]
 localports --kill, -k <port> [--force]
 localports --kill <port> --all [--force]
@@ -61,6 +62,8 @@ Examples:
 ./zig-out/bin/localports --json --verbose
 ./zig-out/bin/localports --tree
 ./zig-out/bin/localports -p 3000 --tree --verbose
+./zig-out/bin/localports --docker
+./zig-out/bin/localports -p 5432 --docker
 ./zig-out/bin/localports --watch
 ./zig-out/bin/localports --watch 1
 ./zig-out/bin/localports 3000 --watch
@@ -154,6 +157,23 @@ PORT   PID    PROCESS  ADDRESS
 
 The chain runs from the immediate parent up toward `launchd` (pid 1), which is omitted. `--tree` composes with `--verbose`, and under `--json` it adds an `ancestors` array per row.
 
+## Docker
+
+On macOS, a port published by a container shows up owned by `com.docker.backend`, which tells you nothing about *which* container. `--docker` resolves it:
+
+```bash
+localports --docker
+localports -p 5432 --docker
+```
+
+```text
+PORT   PID    PROCESS             ADDRESS    CONTAINER
+5432   9743   com.docker.backend  127.0.0.1  pg-dev (postgres:16-alpine ->5432)
+3000   123    node                127.0.0.1  -
+```
+
+It runs `docker ps` once (only when a Docker-owned port is present) to map host port → container name, image, and container-side port. Non-Docker rows show `-`. If `docker` isn't installed or the daemon is down, the column stays `-` rather than erroring. Under `--json` it adds a `container` object (or `null`) per row.
+
 ## JSON output
 
 The default `--json` shape is a stable contract. Each row always has these fields, and new fields are only added behind explicit flags so existing scripts keep working:
@@ -174,6 +194,13 @@ The default `--json` shape is a stable contract. Each row always has these field
 ```json
 { "port": 3000, "pid": 49729, "proto": "tcp", "process": "node", "address": "127.0.0.1",
   "ancestors": [ { "pid": 49687, "name": "npm" }, { "pid": 49600, "name": "zsh" } ] }
+```
+
+`--json --docker` adds a `container` object (or `null`) per row:
+
+```json
+{ "port": 5432, "pid": 9743, "proto": "tcp", "process": "com.docker.backend", "address": "127.0.0.1",
+  "container": { "name": "pg-dev", "image": "postgres:16-alpine", "container_port": 5432 } }
 ```
 
 ## Example

@@ -4,6 +4,12 @@
 
 ### Added
 
+- `--docker` resolves a port held by a Docker process (`com.docker.backend`
+  and friends) to the actual container, showing a `CONTAINER` column
+  (`name (image ->container_port)`) in the table and a `container` object in
+  JSON. It shells out to `docker ps` once, only when a Docker-owned port is
+  present, and degrades silently if docker is missing or the daemon is down.
+  Scan-only; adds output only under the flag.
 - `--tree` shows each listener's parent-process chain (immediate parent up
   toward launchd), rendered as an indented tree in the table and as an
   `ancestors` array in JSON. Composes with `--verbose`. Like other display

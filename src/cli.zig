@@ -17,6 +17,7 @@ pub const Config = struct {
     force_kill: bool = false,
     verbose: bool = false,
     tree: bool = false,
+    docker: bool = false,
     // Kill controls. `kill_all` and `kill_match_pid` refine `--kill <port>`;
     // `kill_pid` is a standalone `--kill-pid <pid>` target.
     kill_all: bool = false,
@@ -92,6 +93,8 @@ pub fn parseArgs(args: anytype) ParseResult {
             config.verbose = true;
         } else if (std.mem.eql(u8, arg, "--tree")) {
             config.tree = true;
+        } else if (std.mem.eql(u8, arg, "--docker")) {
+            config.docker = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
             config.action = .version;
             return .{ .config = config };

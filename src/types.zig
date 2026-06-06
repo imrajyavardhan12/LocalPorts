@@ -14,12 +14,23 @@ pub const PortEntry = struct {
     // Process ancestry (immediate parent first, up toward launchd), populated
     // on demand by enrich under --tree. Null means not requested. Arena-backed.
     ancestors: ?[]const Ancestor = null,
+    // Owning Docker container, populated on demand under --docker when the
+    // listener is held by a Docker process. Null means not requested, not a
+    // Docker port, or unresolved. Arena-backed.
+    container: ?Container = null,
 };
 
 /// One link in a process's ancestry chain.
 pub const Ancestor = struct {
     pid: u32,
     name: []const u8,
+};
+
+/// The Docker container publishing a host port.
+pub const Container = struct {
+    name: []const u8,
+    image: []const u8,
+    container_port: u16,
 };
 
 pub const RowState = enum {

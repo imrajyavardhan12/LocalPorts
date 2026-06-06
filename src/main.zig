@@ -48,8 +48,11 @@ pub fn main(init: std.process.Init) !void {
     if (config.verbose or config.tree) {
         doEnrich(enrich_arena.allocator(), entries, config.verbose, config.tree);
     }
+    if (config.docker) {
+        @import("docker.zig").enrich(enrich_arena.allocator(), entries, init.io);
+    }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
@@ -119,6 +122,7 @@ fn printHelp(io: std.Io) void {
         \\  --force, -f         Skip confirmation for kills
         \\  --verbose           Show user and full command (scan only; use sudo for all)
         \\  --tree              Show each listener's parent process chain (scan only)
+        \\  --docker            Resolve Docker-owned ports to their container (scan only)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
