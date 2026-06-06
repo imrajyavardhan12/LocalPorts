@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Optimized macOS scanner deduplication from a linear scan over collected
+  entries to a hash-set lookup while preserving the existing `(port, pid)`
+  behavior.
+
 ## 0.5.0 - 2026-06-06
 
 ### Added
