@@ -1,0 +1,124 @@
+.Dd June 6, 2026
+.Dt LOCALPORTS 1
+.Os
+.Sh NAME
+.Nm localports
+.Nd inspect local TCP ports and safely free them
+.Sh SYNOPSIS
+.Nm
+.Op Ar port
+.Nm
+.Op Fl p Ar port
+.Op Fl -json
+.Op Fl -verbose
+.Op Fl -tree
+.Op Fl -docker
+.Nm
+.Fl w
+.Op Ar seconds
+.Nm
+.Fl k Ar port
+.Op Fl -all | Fl -pid Ar pid
+.Op Fl f
+.Nm
+.Fl -kill-pid Ar pid
+.Op Fl f
+.Sh DESCRIPTION
+.Nm
+lists listening TCP ports on macOS using libproc directly.
+It is designed for a developer's daily workflow: quickly answer what owns a
+port, why it exists, and what can be safely done about it.
+.Pp
+By default, output is a human-readable table.
+The JSON shape is stable unless extra fields are requested with display flags.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl p , Fl -port Ar port
+Filter by port number.
+A bare positional
+.Ar port
+is also accepted.
+.It Fl -json
+Output machine-readable JSON.
+.It Fl -verbose
+Show the owning user and full command line.
+Some process details require ownership or root privileges.
+.It Fl -tree
+Show each listener's parent-process chain, immediate parent first.
+.It Fl -docker
+Resolve Docker-owned host ports to the publishing container.
+.It Fl w , Fl -watch Op Ar seconds
+Refresh continuously.
+The default interval is 2 seconds; values below 1 are clamped to 1.
+Watch mode is table-only.
+.It Fl k , Fl -kill Ar port
+Kill the process listening on
+.Ar port .
+If more than one process matches, refuse to choose automatically.
+.It Fl a , Fl -all
+With
+.Fl -kill Ar port ,
+kill every matching process.
+.It Fl -pid Ar pid
+With
+.Fl -kill Ar port ,
+kill only
+.Ar pid
+if it is listening on the selected port.
+.It Fl -kill-pid Ar pid
+Kill a process by explicit PID without a port lookup.
+.It Fl f , Fl -force
+Skip kill confirmation.
+.It Fl v , Fl -version
+Show version.
+.It Fl h , Fl -help
+Show help.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds
+.It 0
+Success.
+.It 1
+Error, including invalid arguments, no matching listener, permission denied,
+ambiguous kill refusal, or a failed kill.
+.It 2
+Kill confirmation declined.
+.El
+.Sh EXAMPLES
+.Bl -tag -width Ds
+.It Li localports
+List all listening TCP ports.
+.It Li localports 3000
+Show listeners on port 3000.
+.It Li localports --verbose --tree
+Show owners, command lines, and parent-process chains.
+.It Li localports 5432 --docker
+Resolve a Docker-published port to its container.
+.It Li localports --kill 3000
+Safely terminate the sole listener on port 3000.
+.It Li localports --kill 8000 --pid 6524
+Kill a specific PID only if it is listening on port 8000.
+.El
+.Sh JSON CONTRACT
+Default JSON rows contain:
+.Pp
+.Dl {"port":8000,"pid":6524,"proto":"tcp","process":"Python","address":"127.0.0.1"}
+.Pp
+.Fl -verbose
+adds
+.Sy user
+and
+.Sy command .
+.Fl -tree
+adds
+.Sy ancestors .
+.Fl -docker
+adds
+.Sy container .
+These fields are emitted only when their flags are present.
+.Sh NOTES
+.Nm
+supports macOS today.
+Run with
+.Sy sudo
+to see process details owned by other users.

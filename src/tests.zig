@@ -497,6 +497,30 @@ test "docker parsePsOutput maps host ports to containers" {
     try std.testing.expect(docker.lookup(mappings, 9999) == null);
 }
 
+test "docker parsePsOutput expands published port ranges" {
+    const text = "web\tnginx:alpine\t0.0.0.0:8000-8002->80-82/tcp\n";
+
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+
+    try std.testing.expectEqual(@as(usize, 3), mappings.len);
+    for (0..3) |i| {
+        const host_port: u16 = @intCast(8000 + i);
+        const container_port: u16 = @intCast(80 + i);
+        const c = docker.lookup(mappings, host_port) orelse return error.MissingRangePort;
+        try std.testing.expectEqualStrings("web", c.name);
+        try std.testing.expectEqualStrings("nginx:alpine", c.image);
+        try std.testing.expectEqual(container_port, c.container_port);
+    }
+}
+
+test "docker parsePsOutput skips mismatched port ranges" {
+    const text = "web\tnginx:alpine\t0.0.0.0:8000-8002->80-81/tcp\n";
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+    try std.testing.expectEqual(@as(usize, 0), mappings.len);
+}
+
 test "docker parsePsOutput skips exposed-but-unpublished ports" {
     const text = "x\timg\t80/tcp, 443/tcp\n"; // exposed, not published (no ->)
     const mappings = try docker.parsePsOutput(std.testing.allocator, text);

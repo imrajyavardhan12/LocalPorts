@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Shell completions for zsh, bash, and fish.
+- A `localports(1)` man page, installed by Homebrew and `zig build install`.
+
+### Fixed
+
+- `--tree` now uses BSD process info for ancestor names, avoiding `?` when
+  `proc_name` cannot resolve a parent and reducing ancestry lookup syscalls.
+- `--docker` now expands published port ranges such as
+  `8000-8002->80-82/tcp`.
+- `--docker` now times out the `docker ps` subprocess instead of waiting
+  forever on a hung Docker daemon.
+
 ## 0.4.0 - 2026-06-06
 
 ### Added

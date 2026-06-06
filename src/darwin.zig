@@ -214,26 +214,38 @@ pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tre
     }
 }
 
-fn getPpid(pid: u32) ?u32 {
+fn getBsdInfo(pid: u32) ?ProcBsdInfo {
     var info: ProcBsdInfo = undefined;
     const r = proc_pidinfo(@intCast(pid), PROC_PIDTBSDINFO, 0, @ptrCast(&info), @intCast(@sizeOf(ProcBsdInfo)));
     if (r < @as(c_int, @intCast(@sizeOf(ProcBsdInfo)))) return null;
-    return info.pbi_ppid;
+    return info;
+}
+
+fn fixedCString(bytes: []const u8) ?[]const u8 {
+    const len = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
+    if (len == 0) return null;
+    return bytes[0..len];
+}
+
+fn bsdProcessName(info: *const ProcBsdInfo) []const u8 {
+    return fixedCString(&info.pbi_comm) orelse fixedCString(&info.pbi_name) orelse "?";
 }
 
 /// Walk the parent chain from `start_pid` up toward launchd (pid 1), returning
 /// the ancestors immediate-parent-first. The depth cap guards against cycles.
+/// Ancestor names come from ProcBsdInfo so parent lookup and display-name
+/// fallback share one syscall per link; this avoids `?` when proc_name is not
+/// permitted or cannot resolve a parent.
 fn fillAncestors(arena: std.mem.Allocator, start_pid: u32) ?[]const Ancestor {
     var list: std.ArrayList(Ancestor) = .empty;
-    var ppid = getPpid(start_pid) orelse return null;
+    var ppid = (getBsdInfo(start_pid) orelse return null).pbi_ppid;
 
     var depth: usize = 0;
     while (depth < 32 and ppid > 1) : (depth += 1) {
-        var name_buf: [256]u8 = undefined;
-        const name: []const u8 = if (processName(ppid, &name_buf)) |len| name_buf[0..len] else "?";
-        const owned = arena.dupe(u8, name) catch break;
+        const info = getBsdInfo(ppid) orelse break;
+        const owned = arena.dupe(u8, bsdProcessName(&info)) catch break;
         list.append(arena, .{ .pid = ppid, .name = owned }) catch break;
-        ppid = getPpid(ppid) orelse break;
+        ppid = info.pbi_ppid;
     }
 
     if (list.items.len == 0) return null;
@@ -443,6 +455,20 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
+
+test "bsdProcessName uses pbi_comm for ancestry display" {
+    var info = std.mem.zeroes(ProcBsdInfo);
+    @memcpy(info.pbi_comm[0..3], "zsh");
+
+    try std.testing.expectEqualStrings("zsh", bsdProcessName(&info));
+}
+
+test "bsdProcessName falls back to pbi_name when pbi_comm is empty" {
+    var info = std.mem.zeroes(ProcBsdInfo);
+    @memcpy(info.pbi_name[0..6], "launch");
+
+    try std.testing.expectEqualStrings("launch", bsdProcessName(&info));
+}
 
 fn makeSocketFdInfo(kind: i32, state: i32, vflag: u8, port: u16) SocketFdInfo {
     var sfi = std.mem.zeroes(SocketFdInfo);
