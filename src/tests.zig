@@ -131,6 +131,21 @@ test "CLI parses verbose flag" {
     try std.testing.expect(filtered_config.verbose);
 }
 
+test "CLI parses tree flag" {
+    const defaults = [_][]const u8{"localports"};
+    try std.testing.expect(!(try expectConfig(cli.parseArgs(defaults[0..]))).tree);
+
+    const tree = [_][]const u8{ "localports", "--tree" };
+    const tree_config = try expectConfig(cli.parseArgs(tree[0..]));
+    try std.testing.expectEqual(cli.Action.scan, tree_config.action);
+    try std.testing.expect(tree_config.tree);
+
+    const combo = [_][]const u8{ "localports", "--tree", "--verbose" };
+    const combo_config = try expectConfig(cli.parseArgs(combo[0..]));
+    try std.testing.expect(combo_config.tree);
+    try std.testing.expect(combo_config.verbose);
+}
+
 test "CLI rejects JSON watch output" {
     const argv = [_][]const u8{ "localports", "--json", "--watch" };
     _ = try expectFailure(.watch_json_unsupported, cli.parseArgs(argv[0..]));
@@ -253,13 +268,13 @@ test "kill resolve pid mode selects matching pid or reports absence" {
 test "table output renders empty scans and IPv4 rows" {
     var empty_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer empty_writer.deinit();
-    try output.writeTable(&empty_writer.writer, &.{}, false);
+    try output.writeTable(&empty_writer.writer, &.{}, .{});
     try std.testing.expectEqualStrings("No listening TCP ports found.\n", empty_writer.written());
 
     var row_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer row_writer.deinit();
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
-    try output.writeTable(&row_writer.writer, entries[0..], false);
+    try output.writeTable(&row_writer.writer, entries[0..], .{});
     try std.testing.expectEqualStrings(
         "PORT   PID    PROCESS  ADDRESS\n" ++
             "3000   123    node     127.0.0.1\n",
@@ -272,7 +287,7 @@ test "JSON output renders valid fields and escapes process names" {
     defer writer.deinit();
 
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node\\\"dev", .{ 127, 0, 0, 1 })};
-    try output.writeJson(&writer.writer, entries[0..], false);
+    try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expectEqualStrings(
         "[\n" ++
@@ -288,7 +303,7 @@ test "JSON output escapes control characters" {
 
     const process_name = [_]u8{ 'l', 'i', 'n', 'e', '\n', '\t', 0x01 };
     const entries = [_]PortEntry{entryIPv4(3000, 123, process_name[0..], .{ 127, 0, 0, 1 })};
-    try output.writeJson(&writer.writer, entries[0..], false);
+    try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"process\":\"line\\n\\t\\u0001\"") != null);
 }
@@ -303,7 +318,7 @@ test "JSON output renders IPv6 addresses" {
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x01,
     })};
-    try output.writeJson(&writer.writer, entries[0..], false);
+    try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"2001:0db8:0000:0000:0000:0000:0000:0001\"") != null);
 }
@@ -315,7 +330,7 @@ test "verbose table renders USER and COMMAND columns" {
     var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
     entries[0].user = "rvs";
     entries[0].command = "node server.js";
-    try output.writeTable(&writer.writer, entries[0..], true);
+    try output.writeTable(&writer.writer, entries[0..], .{ .verbose = true });
 
     try std.testing.expectEqualStrings(
         "PORT   PID    PROCESS  ADDRESS    USER  COMMAND\n" ++
@@ -329,7 +344,7 @@ test "verbose table shows dashes for missing user and command" {
     defer writer.deinit();
 
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
-    try output.writeTable(&writer.writer, entries[0..], true);
+    try output.writeTable(&writer.writer, entries[0..], .{ .verbose = true });
 
     try std.testing.expectEqualStrings(
         "PORT   PID    PROCESS  ADDRESS    USER  COMMAND\n" ++
@@ -345,7 +360,7 @@ test "verbose JSON adds user and command fields" {
     var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
     entries[0].user = "rvs";
     entries[0].command = "node server.js";
-    try output.writeJson(&writer.writer, entries[0..], true);
+    try output.writeJson(&writer.writer, entries[0..], .{ .verbose = true });
 
     try std.testing.expectEqualStrings(
         "[\n" ++
@@ -360,7 +375,7 @@ test "verbose JSON emits empty strings for missing user and command" {
     defer writer.deinit();
 
     const entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
-    try output.writeJson(&writer.writer, entries[0..], true);
+    try output.writeJson(&writer.writer, entries[0..], .{ .verbose = true });
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"user\":\"\",\"command\":\"\"") != null);
 }
@@ -372,10 +387,74 @@ test "default JSON omits verbose fields" {
     var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
     entries[0].user = "rvs";
     entries[0].command = "node server.js";
-    try output.writeJson(&writer.writer, entries[0..], false);
+    try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "user") == null);
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "command") == null);
+}
+
+test "tree table renders ancestry beneath the row" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 12345, "node", .{ 127, 0, 0, 1 })};
+    const ancestors = [_]types.Ancestor{
+        .{ .pid = 12340, .name = "npm" },
+        .{ .pid = 12300, .name = "zsh" },
+    };
+    entries[0].ancestors = ancestors[0..];
+    try output.writeTable(&writer.writer, entries[0..], .{ .tree = true });
+
+    try std.testing.expectEqualStrings(
+        "PORT   PID    PROCESS  ADDRESS\n" ++
+            "3000   12345  node     127.0.0.1\n" ++
+            (" " ** 14) ++ "\u{2514}\u{2500} npm (12340)\n" ++
+            (" " ** 16) ++ "\u{2514}\u{2500} zsh (12300)\n",
+        writer.written(),
+    );
+}
+
+test "tree JSON adds an ancestors array" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 12345, "node", .{ 127, 0, 0, 1 })};
+    const ancestors = [_]types.Ancestor{
+        .{ .pid = 12340, .name = "npm" },
+        .{ .pid = 12300, .name = "zsh" },
+    };
+    entries[0].ancestors = ancestors[0..];
+    try output.writeJson(&writer.writer, entries[0..], .{ .tree = true });
+
+    try std.testing.expectEqualStrings(
+        "[\n" ++
+            "  {\"port\":3000,\"pid\":12345,\"proto\":\"tcp\",\"process\":\"node\",\"address\":\"127.0.0.1\"," ++
+            "\"ancestors\":[{\"pid\":12340,\"name\":\"npm\"},{\"pid\":12300,\"name\":\"zsh\"}]}\n" ++
+            "]\n",
+        writer.written(),
+    );
+}
+
+test "tree JSON emits an empty ancestors array when there are none" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const entries = [_]PortEntry{entryIPv4(3000, 12345, "node", .{ 127, 0, 0, 1 })};
+    try output.writeJson(&writer.writer, entries[0..], .{ .tree = true });
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"ancestors\":[]") != null);
+}
+
+test "default output omits ancestors" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(3000, 12345, "node", .{ 127, 0, 0, 1 })};
+    const ancestors = [_]types.Ancestor{.{ .pid = 12340, .name = "npm" }};
+    entries[0].ancestors = ancestors[0..];
+    try output.writeJson(&writer.writer, entries[0..], .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "ancestors") == null);
 }
 
 fn expectConfig(result: cli.ParseResult) !cli.Config {

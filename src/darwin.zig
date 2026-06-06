@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const PortEntry = types.PortEntry;
+const Ancestor = types.Ancestor;
 
 // ── libproc extern declarations ────────────────────────────────────────────
 extern "c" fn proc_listallpids(buffer: ?*anyopaque, buffersize: c_int) c_int;
@@ -192,21 +193,51 @@ pub fn processName(pid: u32, buf: *[256]u8) ?usize {
     return if (nlen > 0) @intCast(nlen) else null;
 }
 
-// ── Verbose enrichment (user + full command) ──────────────────────────────
+// ── Enrichment (verbose: user + command; tree: ancestry) ──────────────────
 
-/// Populate the verbose-only fields (`user`, `command`) of each entry.
-/// Best-effort: any field that cannot be resolved (e.g. another user's
-/// process without sudo) is left null. All strings are allocated from the
-/// caller-owned `arena`, so the caller frees everything at once.
-pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry) void {
-    // One reusable scratch buffer for KERN_PROCARGS2, sized to kern.argmax.
-    const argmax = sysctlArgmax() orelse 4096;
-    const scratch: ?[]u8 = arena.alloc(u8, argmax) catch null;
+/// Populate on-demand fields of each entry: `user`/`command` when `verbose`,
+/// and `ancestors` when `tree`. Best-effort — anything that cannot be resolved
+/// (e.g. another user's process without sudo) is left null. All strings are
+/// allocated from the caller-owned `arena`, so the caller frees everything at
+/// once.
+pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tree: bool) void {
+    // Reusable scratch buffer for KERN_PROCARGS2, sized to kern.argmax. Only
+    // needed for the verbose command lookup.
+    const scratch: ?[]u8 = if (verbose) (arena.alloc(u8, sysctlArgmax() orelse 4096) catch null) else null;
 
     for (entries) |*e| {
-        e.user = lookupUser(arena, e.pid);
-        if (scratch) |s| e.command = lookupCommand(arena, s, e.pid);
+        if (verbose) {
+            e.user = lookupUser(arena, e.pid);
+            if (scratch) |s| e.command = lookupCommand(arena, s, e.pid);
+        }
+        if (tree) e.ancestors = fillAncestors(arena, e.pid);
     }
+}
+
+fn getPpid(pid: u32) ?u32 {
+    var info: ProcBsdInfo = undefined;
+    const r = proc_pidinfo(@intCast(pid), PROC_PIDTBSDINFO, 0, @ptrCast(&info), @intCast(@sizeOf(ProcBsdInfo)));
+    if (r < @as(c_int, @intCast(@sizeOf(ProcBsdInfo)))) return null;
+    return info.pbi_ppid;
+}
+
+/// Walk the parent chain from `start_pid` up toward launchd (pid 1), returning
+/// the ancestors immediate-parent-first. The depth cap guards against cycles.
+fn fillAncestors(arena: std.mem.Allocator, start_pid: u32) ?[]const Ancestor {
+    var list: std.ArrayList(Ancestor) = .empty;
+    var ppid = getPpid(start_pid) orelse return null;
+
+    var depth: usize = 0;
+    while (depth < 32 and ppid > 1) : (depth += 1) {
+        var name_buf: [256]u8 = undefined;
+        const name: []const u8 = if (processName(ppid, &name_buf)) |len| name_buf[0..len] else "?";
+        const owned = arena.dupe(u8, name) catch break;
+        list.append(arena, .{ .pid = ppid, .name = owned }) catch break;
+        ppid = getPpid(ppid) orelse break;
+    }
+
+    if (list.items.len == 0) return null;
+    return list.toOwnedSlice(arena) catch null;
 }
 
 fn sysctlArgmax() ?usize {

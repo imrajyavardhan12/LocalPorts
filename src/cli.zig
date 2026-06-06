@@ -16,6 +16,7 @@ pub const Config = struct {
     kill_port: ?u16 = null,
     force_kill: bool = false,
     verbose: bool = false,
+    tree: bool = false,
     // Kill controls. `kill_all` and `kill_match_pid` refine `--kill <port>`;
     // `kill_pid` is a standalone `--kill-pid <pid>` target.
     kill_all: bool = false,
@@ -89,6 +90,8 @@ pub fn parseArgs(args: anytype) ParseResult {
             config.kill_pid = std.fmt.parseInt(u32, args[i], 10) catch return fail(.invalid_pid_number, args[i]);
         } else if (std.mem.eql(u8, arg, "--verbose")) {
             config.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--tree")) {
+            config.tree = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
             config.action = .version;
             return .{ .config = config };

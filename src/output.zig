@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const PortEntry = types.PortEntry;
+const Ancestor = types.Ancestor;
 const WatchEntry = types.WatchEntry;
 const RowState = types.RowState;
 
@@ -11,7 +12,14 @@ pub const ansi = struct {
     pub const clear_screen = "\x1b[2J\x1b[H";
 };
 
-pub fn writeTable(writer: anytype, entries: []const PortEntry, verbose: bool) !void {
+/// Display toggles for scan output. New display modes go here so call sites
+/// stay self-documenting and the default contract is opt-in only.
+pub const Options = struct {
+    verbose: bool = false,
+    tree: bool = false,
+};
+
+pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !void {
     if (entries.len == 0) {
         try writer.writeAll("No listening TCP ports found.\n");
         return;
@@ -23,7 +31,7 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, verbose: bool) !v
         if (e.name_len + 2 > proc_col) proc_col = e.name_len + 2;
     }
 
-    if (!verbose) {
+    if (!opts.verbose) {
         // Header row.
         try writer.print("PORT   PID    ", .{});
         try padWrite(writer, "PROCESS", proc_col);
@@ -35,6 +43,7 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, verbose: bool) !v
             try padWrite(writer, name, proc_col);
             try writeAddrStr(writer, &e);
             try writer.writeByte('\n');
+            if (opts.tree) try writeAncestors(writer, e.ancestors);
         }
         return;
     }
@@ -64,10 +73,11 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, verbose: bool) !v
         try padWrite(writer, e.user orelse "-", user_col);
         try writer.writeAll(e.command orelse "-");
         try writer.writeByte('\n');
+        if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
 }
 
-pub fn writeJson(writer: anytype, entries: []const PortEntry, verbose: bool) !void {
+pub fn writeJson(writer: anytype, entries: []const PortEntry, opts: Options) !void {
     try writer.writeByte('[');
     for (entries, 0..) |e, i| {
         if (i > 0) try writer.writeByte(',');
@@ -77,18 +87,41 @@ pub fn writeJson(writer: anytype, entries: []const PortEntry, verbose: bool) !vo
         try writer.writeAll("\",\"address\":\"");
         try writeAddrStr(writer, &e);
         try writer.writeByte('"');
-        // Verbose-only fields. Default JSON stays untouched for scripts.
-        if (verbose) {
+        // Opt-in fields only. Default JSON stays untouched for scripts.
+        if (opts.verbose) {
             try writer.writeAll(",\"user\":\"");
             try writeJsonEscaped(writer, e.user orelse "");
             try writer.writeAll("\",\"command\":\"");
             try writeJsonEscaped(writer, e.command orelse "");
             try writer.writeByte('"');
         }
+        if (opts.tree) {
+            try writer.writeAll(",\"ancestors\":[");
+            if (e.ancestors) |ancestors| {
+                for (ancestors, 0..) |anc, j| {
+                    if (j > 0) try writer.writeByte(',');
+                    try writer.print("{{\"pid\":{d},\"name\":\"", .{anc.pid});
+                    try writeJsonEscaped(writer, anc.name);
+                    try writer.writeAll("\"}");
+                }
+            }
+            try writer.writeByte(']');
+        }
         try writer.writeByte('}');
     }
     if (entries.len > 0) try writer.writeByte('\n');
     try writer.writeAll("]\n");
+}
+
+/// Print a listener's ancestry beneath its row, immediate parent first, each
+/// level indented one step further (aligned under the PROCESS column).
+fn writeAncestors(writer: anytype, ancestors: ?[]const Ancestor) !void {
+    const list = ancestors orelse return;
+    for (list, 0..) |anc, depth| {
+        var indent: usize = 14 + depth * 2;
+        while (indent > 0) : (indent -= 1) try writer.writeByte(' ');
+        try writer.print("\u{2514}\u{2500} {s} ({d})\n", .{ anc.name, anc.pid });
+    }
 }
 
 pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry) !void {

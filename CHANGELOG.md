@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `--tree` shows each listener's parent-process chain (immediate parent up
+  toward launchd), rendered as an indented tree in the table and as an
+  `ancestors` array in JSON. Composes with `--verbose`. Like other display
+  flags it is scan-only and adds JSON fields only under the flag, leaving the
+  default contract unchanged.
+
 ## 0.3.0 - 2026-06-05
 
 ### Added
