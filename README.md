@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/port.png" alt="localports" width="120">
+</p>
+
 <h1 align="center">localports</h1>
 
 <p align="center">A fast macOS CLI to see what's on a port, understand <em>why</em>, and safely free it.</p>
