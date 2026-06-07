@@ -27,6 +27,15 @@ jobs:
       - name: Check version metadata
         run: bash scripts/check-version.sh
 
+      - name: Check CLI assets
+        run: |
+          bash scripts/check-cli-assets.sh
+          bash -n completions/localports.bash
+          zsh -n completions/_localports
+          if command -v fish >/dev/null; then fish -n completions/localports.fish; fi
+          mandoc -Tlint man/localports.1
+          ruby -c Formula/localports.rb
+
       - name: Build
         run: zig build -Doptimize=ReleaseFast
 

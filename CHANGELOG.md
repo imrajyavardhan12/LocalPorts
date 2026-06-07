@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- macOS scanner integration test that binds a real TCP listener and verifies
+  the scanner discovers it through the full libproc path.
+- CI checks for shell completion/man page/formula syntax and CLI flag drift
+  across help text, completions, and the man page.
+
 ## 0.5.1 - 2026-06-06
 
 ### Changed
