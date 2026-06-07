@@ -9,6 +9,13 @@
 - CI checks for shell completion/man page/formula syntax and CLI flag drift
   across help text, completions, and the man page.
 
+### Fixed
+
+- Watch mode no longer destroys the terminal scrollback buffer on each
+  refresh. The clear-screen sequence now uses ED 0 (clear from cursor to
+  end of screen) instead of ED 2 (clear entire screen), matching the
+  behavior of `top`, `htop`, and `watch`.
+
 ## 0.5.1 - 2026-06-06
 
 ### Changed

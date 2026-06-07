@@ -10,7 +10,10 @@ pub const ansi = struct {
     pub const green = "\x1b[32m";
     pub const red = "\x1b[31m";
     pub const reset = "\x1b[0m";
-    pub const clear_screen = "\x1b[2J\x1b[H";
+    // ED 0 (clear from cursor to end) after CUP home. Avoids ED 2
+    // ("clear entire screen"), which modern terminals also apply to
+    // the scrollback buffer — undesirable for a live-refresh tool.
+    pub const clear_screen = "\x1b[H\x1b[J";
 };
 
 /// Display toggles for scan output. New display modes go here so call sites
