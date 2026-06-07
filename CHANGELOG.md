@@ -11,6 +11,11 @@
 
 ### Fixed
 
+- Watch mode now honors the `--verbose`, `--tree`, and `--docker` display
+  flags. They were previously accepted but silently ignored under `--watch`,
+  which only ever rendered the base PORT/PID/PROCESS/ADDRESS table; the
+  enrichment columns now refresh on every cycle just as they do for one-shot
+  scans.
 - Watch mode no longer destroys the terminal scrollback buffer on each
   refresh. The clear-screen sequence now uses ED 0 (clear from cursor to
   end of screen) instead of ED 2 (clear entire screen), matching the

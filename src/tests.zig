@@ -246,6 +246,76 @@ test "watch classification reports no changes for stable rows" {
     try std.testing.expectEqual(types.RowState.unchanged, classified[0].state);
 }
 
+test "watch table renders verbose columns" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]types.WatchEntry{
+        .{ .entry = entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }), .state = .unchanged },
+    };
+    entries[0].entry.user = "rvs";
+    entries[0].entry.command = "node server.js";
+    try output.writeWatchTable(&writer.writer, entries[0..], .{ .verbose = true });
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "USER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "COMMAND") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "rvs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "node server.js") != null);
+}
+
+test "watch table default output omits enrichment columns" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]types.WatchEntry{
+        .{ .entry = entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }), .state = .unchanged },
+    };
+    entries[0].entry.user = "rvs";
+    entries[0].entry.command = "node server.js";
+    entries[0].entry.ancestors = &.{.{ .pid = 100, .name = "zsh" }};
+    try output.writeWatchTable(&writer.writer, entries[0..], .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "USER") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "COMMAND") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "CONTAINER") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\u{2514}") == null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "PROCESS") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "ADDRESS") != null);
+}
+
+test "watch table renders docker container column" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]types.WatchEntry{
+        .{ .entry = entryIPv4(5432, 9743, "com.docker.backend", .{ 127, 0, 0, 1 }), .state = .new },
+    };
+    entries[0].entry.container = .{ .name = "pg-dev", .image = "postgres:16", .container_port = 5432 };
+    try output.writeWatchTable(&writer.writer, entries[0..], .{ .docker = true });
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "CONTAINER") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "pg-dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "postgres:16") != null);
+}
+
+test "watch table renders ancestry trees" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]types.WatchEntry{
+        .{ .entry = entryIPv4(3000, 12345, "node", .{ 127, 0, 0, 1 }), .state = .unchanged },
+    };
+    const ancestors = [_]types.Ancestor{
+        .{ .pid = 12340, .name = "npm" },
+        .{ .pid = 12300, .name = "zsh" },
+    };
+    entries[0].entry.ancestors = ancestors[0..];
+    try output.writeWatchTable(&writer.writer, entries[0..], .{ .tree = true });
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\u{2514}\u{2500} npm (12340)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\u{2514}\u{2500} zsh (12300)") != null);
+}
+
 test "kill resolve single mode refuses ambiguous matches" {
     const none = [_]PortEntry{};
     try std.testing.expectEqual(killcmd.KillResolution.none, killcmd.resolve(none[0..], .single));

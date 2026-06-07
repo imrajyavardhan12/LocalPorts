@@ -58,33 +58,42 @@ fn formatContainer(buf: []u8, container: ?Container) []const u8 {
     return std.fmt.bufPrint(buf, "{s} ({s} ->{d})", .{ c.name, c.image, c.container_port }) catch "-";
 }
 
+/// Assemble the visible column list for `opts` into `buf`, returning the
+/// populated slice. PROCESS and ADDRESS are always present; USER/COMMAND come
+/// with --verbose and CONTAINER with --docker. COMMAND stays last (it can be
+/// long, so it is never padded); CONTAINER sits just before it. This is the
+/// single source of truth for the column set, shared by `writeTable` and
+/// `writeWatchTable` so the two never drift.
+fn assembleColumns(opts: Options, buf: *[5]Column) []Column {
+    var n: usize = 0;
+    buf[n] = .process;
+    n += 1;
+    buf[n] = .address;
+    n += 1;
+    if (opts.verbose) {
+        buf[n] = .user;
+        n += 1;
+    }
+    if (opts.docker) {
+        buf[n] = .container;
+        n += 1;
+    }
+    if (opts.verbose) {
+        buf[n] = .command;
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !void {
     if (entries.len == 0) {
         try writer.writeAll("No listening TCP ports found.\n");
         return;
     }
 
-    // Assemble the column list. COMMAND stays last; CONTAINER sits before it.
     var cols: [5]Column = undefined;
-    var n: usize = 0;
-    cols[n] = .process;
-    n += 1;
-    cols[n] = .address;
-    n += 1;
-    if (opts.verbose) {
-        cols[n] = .user;
-        n += 1;
-    }
-    if (opts.docker) {
-        cols[n] = .container;
-        n += 1;
-    }
-    if (opts.verbose) {
-        cols[n] = .command;
-        n += 1;
-    }
-    const columns = cols[0..n];
-    const last = n - 1;
+    const columns = assembleColumns(opts, &cols);
+    const last = columns.len - 1;
 
     // Compute padded widths for every column except the last (rendered raw).
     var cell_buf: [1024]u8 = undefined;
@@ -184,7 +193,7 @@ fn writeAncestors(writer: anytype, ancestors: ?[]const Ancestor) !void {
     }
 }
 
-pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry) !void {
+pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Options) !void {
     try writer.writeAll(ansi.clear_screen);
 
     if (entries.len == 0) {
@@ -192,17 +201,35 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry) !void {
         return;
     }
 
-    // Compute PROCESS column width.
-    var proc_col: usize = 9;
-    for (entries) |we| {
-        if (we.entry.name_len + 2 > proc_col) proc_col = we.entry.name_len + 2;
+    var cols: [5]Column = undefined;
+    const columns = assembleColumns(opts, &cols);
+    const last = columns.len - 1;
+
+    // Compute padded widths for every column except the last.
+    var cell_buf: [1024]u8 = undefined;
+    var widths: [5]usize = .{0} ** 5;
+    for (columns, 0..) |col, ci| {
+        if (ci == last) break;
+        var w: usize = columnHeader(col).len + 2;
+        for (entries) |we| {
+            const len = columnCell(col, &we.entry, &cell_buf).len;
+            if (len + 2 > w) w = len + 2;
+        }
+        widths[ci] = w;
     }
 
     // Header row.
     try writer.print("PORT   PID    ", .{});
-    try padWrite(writer, "PROCESS", proc_col);
-    try writer.writeAll("ADDRESS\n");
+    for (columns, 0..) |col, ci| {
+        if (ci == last) {
+            try writer.writeAll(columnHeader(col));
+        } else {
+            try padWrite(writer, columnHeader(col), widths[ci]);
+        }
+    }
+    try writer.writeByte('\n');
 
+    // Rows with color coding.
     for (entries) |we| {
         const e = we.entry;
         const color = switch (we.state) {
@@ -211,12 +238,19 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry) !void {
             .unchanged => "",
         };
         const reset_color = if (color.len > 0) ansi.reset else "";
-        const name = e.name[0..e.name_len];
+
         try writer.print("{s}{d:<6} {d:<6} ", .{ color, e.port, e.pid });
-        try padWrite(writer, name, proc_col);
-        try writeAddrStr(writer, &e);
+        for (columns, 0..) |col, ci| {
+            const text = columnCell(col, &e, &cell_buf);
+            if (ci == last) {
+                try writer.writeAll(text);
+            } else {
+                try padWrite(writer, text, widths[ci]);
+            }
+        }
         try writer.writeAll(reset_color);
         try writer.writeByte('\n');
+        if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
 }
 
