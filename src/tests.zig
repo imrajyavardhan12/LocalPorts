@@ -187,6 +187,28 @@ test "port-pid watch keys do not collide on pid low bits" {
     try std.testing.expect(types.portPidKey(3000, 1) != types.portPidKey(3000, 65537));
 }
 
+test "macOS scanner sees a real listening TCP socket" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const fd = try listenOnLoopbackEphemeralPort();
+    defer _ = std.c.close(fd);
+
+    const port = try boundPort(fd);
+    const entries = try @import("darwin.zig").scan(std.testing.allocator, port);
+    defer std.testing.allocator.free(entries);
+
+    const pid: u32 = @intCast(std.c.getpid());
+    for (entries) |entry| {
+        if (entry.port == port and entry.pid == pid) {
+            try std.testing.expect(!entry.is_ipv6);
+            try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, entry.addr4);
+            return;
+        }
+    }
+
+    return error.ExpectedScannerEntry;
+}
+
 test "watch classification detects new removed and unchanged rows" {
     const previous = [_]PortEntry{
         entryIPv4(3000, 100, "node", .{ 127, 0, 0, 1 }),
@@ -624,6 +646,29 @@ fn expectFailure(expected: cli.ParseFailureKind, result: cli.ParseResult) !cli.P
             return failure;
         },
     };
+}
+
+fn listenOnLoopbackEphemeralPort() !std.c.fd_t {
+    const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, std.c.IPPROTO.TCP);
+    if (fd < 0) return error.SocketFailed;
+    errdefer _ = std.c.close(fd);
+
+    var addr = std.mem.zeroes(std.c.sockaddr.in);
+    addr.len = @sizeOf(std.c.sockaddr.in);
+    addr.family = std.c.AF.INET;
+    addr.port = 0;
+    addr.addr = std.mem.nativeToBig(u32, 0x7f000001);
+
+    if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.c.sockaddr.in)) != 0) return error.BindFailed;
+    if (std.c.listen(fd, 1) != 0) return error.ListenFailed;
+    return fd;
+}
+
+fn boundPort(fd: std.c.fd_t) !u16 {
+    var addr = std.mem.zeroes(std.c.sockaddr.in);
+    var len: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
+    if (std.c.getsockname(fd, @ptrCast(&addr), &len) != 0) return error.GetSockNameFailed;
+    return std.mem.bigToNative(u16, addr.port);
 }
 
 fn entryIPv4(port: u16, pid: u32, name: []const u8, addr: [4]u8) PortEntry {
