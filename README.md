@@ -73,9 +73,9 @@ localports [options] [port]
 | --- | --- |
 | `-p, --port <port>` | Filter by port number (also accepted as a bare positional argument) |
 | `--json` | Machine-readable JSON output |
-| `--verbose` | Show the owning user and full command line (scan only) |
-| `--tree` | Show each listener's parent-process chain (scan only) |
-| `--docker` | Resolve Docker-owned ports to their container (scan only) |
+| `--verbose` | Show the owning user and full command line |
+| `--tree` | Show each listener's parent-process chain |
+| `--docker` | Resolve Docker-owned ports to their container |
 | `-w, --watch [secs]` | Live refresh, default every 2 seconds |
 | `-k, --kill <port>` | Kill the process on a port (refuses ambiguous matches) |
 | `-a, --all` | With `--kill <port>`: kill every matching process |
@@ -85,7 +85,7 @@ localports [options] [port]
 | `-h, --help` | Show help |
 | `-v, --version` | Show version |
 
-The display flags (`--verbose`, `--tree`, `--docker`) compose with each other and apply to one-shot scans.
+The display flags (`--verbose`, `--tree`, `--docker`) compose with each other and apply to both one-shot scans and `--watch`.
 
 ## Verbose mode
 
@@ -154,6 +154,8 @@ Watch mode is table-only; `--json --watch` is rejected. Rows are color-coded:
 - **Green** — newly appeared listener
 - **Red** — listener that disappeared since the previous refresh
 - Default — unchanged listener
+
+The display flags compose with watch: `--watch --verbose`, `--watch --tree`, and `--watch --docker` add the same columns they do for one-shot scans, re-resolved on every refresh.
 
 ## Kill mode
 

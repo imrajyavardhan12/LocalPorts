@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
             return;
         },
         .watch => {
-            try watchLoop(allocator, config.watch_interval, config.filter_port, init.io);
+            try watchLoop(allocator, config, init.io);
             return;
         },
         .scan => {},
@@ -120,9 +120,9 @@ fn printHelp(io: std.Io) void {
         \\  --pid <pid>         With --kill <port>: kill only that pid if on the port
         \\  --kill-pid <pid>    Kill a process by explicit PID
         \\  --force, -f         Skip confirmation for kills
-        \\  --verbose           Show user and full command (scan only; use sudo for all)
-        \\  --tree              Show each listener's parent process chain (scan only)
-        \\  --docker            Resolve Docker-owned ports to their container (scan only)
+        \\  --verbose           Show user and full command (use sudo for all)
+        \\  --tree              Show each listener's parent process chain
+        \\  --docker            Resolve Docker-owned ports to their container
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
@@ -154,14 +154,33 @@ fn printVersion(io: std.Io) void {
     w.flush() catch {};
 }
 
-fn watchLoop(allocator: std.mem.Allocator, interval_secs: u32, filter_port: ?u16, io: std.Io) !void {
-    const interval_ns: i96 = @as(i96, interval_secs) * std.time.ns_per_s;
+fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void {
+    const interval_ns: i96 = @as(i96, config.watch_interval) * std.time.ns_per_s;
     var previous_entries: ?[]PortEntry = null;
-    defer if (previous_entries) |entries| allocator.free(entries);
+    var previous_arena: ?std.heap.ArenaAllocator = null;
+    defer {
+        if (previous_entries) |entries| allocator.free(entries);
+        if (previous_arena) |*a| a.deinit();
+    }
+
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker };
 
     while (true) {
-        var current_entries: ?[]PortEntry = try doScan(allocator, filter_port);
+        var current_entries: ?[]PortEntry = try doScan(allocator, config.filter_port);
         errdefer if (current_entries) |entries| allocator.free(entries);
+
+        // Enrich current entries with an arena (freed at the end of the next
+        // cycle, after its strings have been rendered as "removed" rows).
+        // Optional so ownership can be moved to `previous_arena` below without
+        // the errdefer also deiniting the same buffers — see the move below.
+        var current_arena: ?std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(allocator);
+        errdefer if (current_arena) |*a| a.deinit();
+        if (config.verbose or config.tree) {
+            doEnrich(current_arena.?.allocator(), current_entries.?, config.verbose, config.tree);
+        }
+        if (config.docker) {
+            @import("docker.zig").enrich(current_arena.?.allocator(), current_entries.?, io);
+        }
 
         const previous = if (previous_entries) |entries| entries else &.{};
         const current = current_entries.?;
@@ -171,15 +190,23 @@ fn watchLoop(allocator: std.mem.Allocator, interval_secs: u32, filter_port: ?u16
         var out_buf: [65536]u8 = undefined;
         var file_writer = std.Io.File.stdout().writer(io, &out_buf);
         const w = &file_writer.interface;
-        try output.writeWatchTable(w, watch_entries);
+        try output.writeWatchTable(w, watch_entries, opts);
         if (!watch.hasChanges(watch_entries) and watch_entries.len > 0) {
             try w.writeAll("No changes detected.\n");
         }
         try w.flush();
 
+        // Free previous cycle's data (entries + enrichment arena), then move
+        // ownership of this cycle's data into the "previous" slots. Null out the
+        // locals so their errdefers no longer reference the now-moved buffers; a
+        // by-value ArenaAllocator copy shares the same buffer list, so deiniting
+        // both copies would be a double free.
         if (previous_entries) |entries| allocator.free(entries);
+        if (previous_arena) |*a| a.deinit();
         previous_entries = current_entries;
+        previous_arena = current_arena;
         current_entries = null;
+        current_arena = null;
 
         try std.Io.sleep(io, .fromNanoseconds(interval_ns), .awake);
     }
