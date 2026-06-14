@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Homebrew now installs a prebuilt, self-contained binary instead of compiling
+  from source. The formula downloads a per-architecture release binary
+  (cross-compiled with Zig, links only `/usr/lib/libSystem`) and no longer
+  depends on the `zig`/LLVM build toolchain, so `brew install localports` is
+  near-instant and pulls no build dependencies. After upgrading, an existing
+  source install can reclaim the toolchain (~1.8 GB) with `brew autoremove`.
+
+### Added
+
+- Release workflow cross-compiles macOS arm64 and x86_64 binaries, smoke-tests
+  the arm64 artifact, uploads them as release assets, and templates the tap
+  formula from them. CI exercises the same packaging on every push.
+
 ## 0.5.2 - 2026-06-14
 
 ### Added

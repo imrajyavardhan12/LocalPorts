@@ -50,3 +50,13 @@ jobs:
 
       - name: Smoke test JSON
         run: ./zig-out/bin/localports --json | python3 -m json.tool > /dev/null
+
+      - name: Package release binaries (cross-compile check)
+        run: bash scripts/package-release.sh dist
+
+      - name: Smoke test packaged arm64 binary
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar -xzf dist/localports-aarch64-macos.tar.gz -C "${tmp}"
+          "${tmp}/localports" --version | grep '^localports '

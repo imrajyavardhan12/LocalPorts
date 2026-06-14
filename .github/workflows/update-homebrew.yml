@@ -1,35 +1,68 @@
-name: Update Homebrew Tap
+name: Release
 
 on:
   release:
     types: [published]
 
+# Upload built binaries back to the release; the tap push uses TAP_GITHUB_TOKEN.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  update-tap:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: macos-latest
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
 
       - name: Validate release tag
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: bash scripts/check-version.sh "${TAG}"
 
-      - name: Compute tarball SHA
-        id: tarball
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-          REPO: ${{ github.repository }}
+      - name: Build and package macOS binaries
+        run: bash scripts/package-release.sh dist
+
+      - name: Smoke test arm64 binary
         run: |
           set -euo pipefail
-          URL="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
-          SHA=$(curl -fsSL "$URL" | sha256sum | awk '{print $1}')
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          tmp="$(mktemp -d)"
+          tar -xzf dist/localports-aarch64-macos.tar.gz -C "${tmp}"
+          "${tmp}/localports" --version | grep '^localports '
+          "${tmp}/localports" --help >/dev/null
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "${TAG}" \
+            dist/localports-aarch64-macos.tar.gz \
+            dist/localports-x86_64-macos.tar.gz \
+            --clobber
+
+      - name: Compute asset metadata
+        id: assets
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/${REPO}/releases/download/${TAG}"
+          arm_sha=$(shasum -a 256 dist/localports-aarch64-macos.tar.gz | awk '{print $1}')
+          x64_sha=$(shasum -a 256 dist/localports-x86_64-macos.tar.gz | awk '{print $1}')
+          {
+            echo "version=${TAG#v}"
+            echo "arm_url=${base}/localports-aarch64-macos.tar.gz"
+            echo "arm_sha=${arm_sha}"
+            echo "x64_url=${base}/localports-x86_64-macos.tar.gz"
+            echo "x64_sha=${x64_sha}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Clone tap repo
         env:
@@ -41,17 +74,31 @@ jobs:
 
       - name: Update formula
         env:
-          URL: ${{ steps.tarball.outputs.url }}
-          SHA: ${{ steps.tarball.outputs.sha }}
+          VERSION: ${{ steps.assets.outputs.version }}
+          ARM_URL: ${{ steps.assets.outputs.arm_url }}
+          ARM_SHA: ${{ steps.assets.outputs.arm_sha }}
+          X64_URL: ${{ steps.assets.outputs.x64_url }}
+          X64_SHA: ${{ steps.assets.outputs.x64_sha }}
         run: |
           set -euo pipefail
           mkdir -p homebrew-localports/Formula
           cp Formula/localports.rb homebrew-localports/Formula/localports.rb
           cd homebrew-localports
-          perl -0pi -e 's|^  url ".*"|  url "$ENV{URL}"|m' Formula/localports.rb
-          perl -0pi -e 's|^  sha256 ".*"|  sha256 "$ENV{SHA}"|m' Formula/localports.rb
-          grep -F "${URL}" Formula/localports.rb
-          grep -F "${SHA}" Formula/localports.rb
+          sed -i.bak \
+            -e "s|VERSION_PLACEHOLDER|${VERSION}|" \
+            -e "s|AARCH64_URL_PLACEHOLDER|${ARM_URL}|" \
+            -e "s|AARCH64_SHA_PLACEHOLDER|${ARM_SHA}|" \
+            -e "s|X86_64_URL_PLACEHOLDER|${X64_URL}|" \
+            -e "s|X86_64_SHA_PLACEHOLDER|${X64_SHA}|" \
+            Formula/localports.rb
+          rm -f Formula/localports.rb.bak
+          ruby -c Formula/localports.rb
+          if grep -q PLACEHOLDER Formula/localports.rb; then
+            echo "error: unreplaced placeholder remains in formula" >&2
+            exit 1
+          fi
+          grep -F "${ARM_SHA}" Formula/localports.rb >/dev/null
+          grep -F "${X64_SHA}" Formula/localports.rb >/dev/null
 
       - name: Commit and push
         env:

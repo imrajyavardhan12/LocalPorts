@@ -37,6 +37,8 @@ brew tap imrajyavardhan12/localports
 brew install localports
 ```
 
+This installs a prebuilt, self-contained binary — no compiler or build toolchain is pulled in.
+
 ### Build from source
 
 Requires [Zig](https://ziglang.org) 0.16.x.
