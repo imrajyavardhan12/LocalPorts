@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- IPv6 addresses now display in their canonical RFC 5952 form (lowercase, leading
+  zeros suppressed, the longest run of zero groups collapsed to `::`) in both the
+  table and JSON output — e.g. `::1` instead of
+  `0000:0000:0000:0000:0000:0000:0000:0001`.
+
 ## 0.5.3 - 2026-06-14
 
 ### Changed

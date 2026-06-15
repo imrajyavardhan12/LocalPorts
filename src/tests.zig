@@ -9,10 +9,11 @@ const watch = @import("watch.zig");
 
 const PortEntry = types.PortEntry;
 
-// Pull in the platform backend's own tests on the platforms where it compiles.
-// The Darwin backend's socket-decode logic lives behind libproc structs that
-// only have a valid layout on macOS, so it is only referenced there.
+// Pull in other modules' own tests. The Darwin backend's socket-decode logic
+// lives behind libproc structs that only have a valid layout on macOS, so it is
+// only referenced there; output.zig is platform-independent.
 test {
+    _ = @import("output.zig");
     if (builtin.os.tag == .macos) {
         _ = @import("darwin.zig");
     }
@@ -449,7 +450,7 @@ test "JSON output renders IPv6 addresses" {
     })};
     try output.writeJson(&writer.writer, entries[0..], .{});
 
-    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"2001:0db8:0000:0000:0000:0000:0000:0001\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"2001:db8::1\"") != null);
 }
 
 test "verbose table renders USER and COMMAND columns" {
