@@ -287,18 +287,83 @@ fn writeAddrStr(writer: anytype, e: *const PortEntry) !void {
 }
 
 /// Render an address into `buf` and return the written slice. `buf` must be at
-/// least 39 bytes (longest is a zero-padded IPv6 address). Single source of
+/// least 39 bytes (longest is a full eight-group IPv6 address). Single source of
 /// truth for both rendering and column-width measurement.
 fn formatAddr(buf: []u8, e: *const PortEntry) []const u8 {
-    if (e.is_ipv6) {
-        const b = &e.addr6;
-        return std.fmt.bufPrint(buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
-            b[0],  b[1],  b[2],  b[3],
-            b[4],  b[5],  b[6],  b[7],
-            b[8],  b[9],  b[10], b[11],
-            b[12], b[13], b[14], b[15],
-        }) catch unreachable; // buf is provably large enough (see doc comment)
-    }
+    if (e.is_ipv6) return formatIpv6(buf, &e.addr6);
     const b = &e.addr4;
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch unreachable;
+}
+
+/// Render an IPv6 address into `buf` in RFC 5952 canonical form: lowercase hex,
+/// leading zeros in each group suppressed, and the longest run of two or more
+/// consecutive all-zero groups collapsed to "::" (the first such run on a tie).
+/// IPv4-mapped addresses are not given the dotted-quad form (RFC 5952 4.3 is a
+/// SHOULD); they render as plain hex, e.g. ::ffff:7f00:1. `buf` must be >= 39.
+fn formatIpv6(buf: []u8, addr: *const [16]u8) []const u8 {
+    var groups: [8]u16 = undefined;
+    for (&groups, 0..) |*g, i| {
+        g.* = (@as(u16, addr[i * 2]) << 8) | addr[i * 2 + 1];
+    }
+
+    // Longest run of consecutive zero groups; only runs of length >= 2 collapse.
+    var run_start: usize = 0;
+    var run_len: usize = 0;
+    var i: usize = 0;
+    while (i < 8) {
+        if (groups[i] != 0) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        while (i < 8 and groups[i] == 0) : (i += 1) {}
+        if (i - start > run_len) {
+            run_len = i - start;
+            run_start = start;
+        }
+    }
+    if (run_len < 2) run_len = 0;
+
+    var len: usize = 0;
+    var g: usize = 0;
+    var need_colon = false;
+    while (g < 8) {
+        if (run_len != 0 and g == run_start) {
+            // The "::" supplies the separators on both sides, so any pending
+            // colon is absorbed: "fe80" + "::" renders as "fe80::".
+            buf[len] = ':';
+            buf[len + 1] = ':';
+            len += 2;
+            g += run_len;
+            need_colon = false;
+            continue;
+        }
+        if (need_colon) {
+            buf[len] = ':';
+            len += 1;
+        }
+        len += (std.fmt.bufPrint(buf[len..], "{x}", .{groups[g]}) catch unreachable).len;
+        need_colon = true;
+        g += 1;
+    }
+    return buf[0..len];
+}
+
+test "formatIpv6 renders RFC 5952 canonical form" {
+    var buf: [46]u8 = undefined;
+    const cases = .{
+        .{ [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, "::1" },
+        .{ [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, "2001:db8::1" },
+        .{ [16]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6 }, "2001:db8:1:2:3:4:5:6" },
+        .{ [16]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, "fe80::" },
+        .{ [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, "::" },
+        // A lone zero group is left as "0" (RFC 5952 4.2.2).
+        .{ [16]u8{ 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1 }, "1:0:1:1:1:1:1:1" },
+        // Tie on run length: the first run collapses, the second stays.
+        .{ [16]u8{ 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1 }, "1::1:0:0:1:1" },
+    };
+    inline for (cases) |c| {
+        const addr: [16]u8 = c[0];
+        try std.testing.expectEqualStrings(c[1], formatIpv6(&buf, &addr));
+    }
 }
