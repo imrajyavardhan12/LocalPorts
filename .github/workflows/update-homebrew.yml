@@ -8,12 +8,18 @@ on:
 permissions:
   contents: write
 
+# mlugg/setup-zig has no Node 24 release yet (latest v2.2.1 still declares
+# node20). Opt its action runtime into Node 24 ahead of GitHub's forced
+# 2026-06-16 switch. Remove once setup-zig ships a Node 24 release.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   release:
     runs-on: macos-latest
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
