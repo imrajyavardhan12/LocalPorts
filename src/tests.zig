@@ -482,6 +482,26 @@ test "table tags network-bound listeners and leaves loopback rows clean" {
     try std.testing.expect(std.mem.count(u8, out, "! network") == 1);
 }
 
+test "verbose table keeps the network tag beside the address, not at the row end" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv4(5000, 641, "proc", .{ 0, 0, 0, 0 })};
+    entries[0].user = "rvs";
+    entries[0].command = "the-long-command";
+    try output.writeTable(&writer.writer, entries[0..], .{ .verbose = true });
+
+    const out = writer.written();
+    // The tag follows the address directly, and stays ahead of USER/COMMAND
+    // rather than being stranded after a long command at the row's end.
+    try std.testing.expect(std.mem.indexOf(u8, out, "0.0.0.0  ! network") != null);
+    const tag = std.mem.indexOf(u8, out, "! network").?;
+    const user = std.mem.indexOf(u8, out, "rvs").?;
+    const cmd = std.mem.indexOf(u8, out, "the-long-command").?;
+    try std.testing.expect(tag < user);
+    try std.testing.expect(user < cmd);
+}
+
 test "JSON output renders valid fields and escapes process names" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();

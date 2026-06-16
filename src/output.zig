@@ -63,11 +63,23 @@ fn columnHeader(col: Column) []const u8 {
 fn columnCell(col: Column, e: *const PortEntry, buf: []u8) []const u8 {
     return switch (col) {
         .process => e.name[0..e.name_len],
-        .address => formatAddr(buf, e),
+        .address => formatAddrWithScope(buf, e),
         .user => e.user orelse "-",
         .command => e.command orelse "-",
         .container => formatContainer(buf, e.container),
     };
+}
+
+/// The ADDRESS cell for the table: the address, plus the `! network` tag when
+/// the listener is reachable from the network. Folding the tag into the cell
+/// (rather than appending it at the row's end) keeps it next to the address and
+/// — since the cell is measured for column width — aligned across rows in every
+/// display mode. JSON uses `formatAddr` directly, so it stays untagged.
+fn formatAddrWithScope(buf: []u8, e: *const PortEntry) []const u8 {
+    const addr = formatAddr(buf, e);
+    if (types.scopeOf(e) != .network) return addr;
+    @memcpy(buf[addr.len..][0..exposed_tag.len], exposed_tag);
+    return buf[0 .. addr.len + exposed_tag.len];
 }
 
 fn formatContainer(buf: []u8, container: ?Container) []const u8 {
@@ -147,7 +159,6 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !v
                 try padWrite(writer, text, widths[ci]);
             }
         }
-        if (types.scopeOf(&e) == .network) try writer.writeAll(exposed_tag);
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
@@ -266,7 +277,6 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
                 try padWrite(writer, text, widths[ci]);
             }
         }
-        if (types.scopeOf(&e) == .network) try writer.writeAll(exposed_tag);
         try writer.writeAll(reset_color);
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
