@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The `! network` exposure tag now stays aligned directly after the address in
+  `--verbose` and `--docker` output, instead of trailing the row past a long
+  command. The default view is unchanged.
+
 ## 0.6.0 - 2026-06-16
 
 ### Added
