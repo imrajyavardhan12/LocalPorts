@@ -27,7 +27,19 @@ pub const Options = struct {
     verbose: bool = false,
     tree: bool = false,
     docker: bool = false,
+    // Whether the `--exposed` filter is active. Used only to tailor the
+    // empty-state message ("nothing network-reachable" vs "nothing listening").
+    exposed: bool = false,
 };
+
+/// The empty-scan message, tailored to whether the `--exposed` filter is on so
+/// an empty audit reads as reassurance rather than "nothing is listening".
+fn emptyMessage(opts: Options) []const u8 {
+    return if (opts.exposed)
+        "No network-reachable ports found.\n"
+    else
+        "No listening TCP ports found.\n";
+}
 
 /// The variable columns that follow the fixed PORT/PID prefix. PROCESS and
 /// ADDRESS are always present; USER/COMMAND come with --verbose and CONTAINER
@@ -92,7 +104,7 @@ fn assembleColumns(opts: Options, buf: *[5]Column) []Column {
 
 pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !void {
     if (entries.len == 0) {
-        try writer.writeAll("No listening TCP ports found.\n");
+        try writer.writeAll(emptyMessage(opts));
         return;
     }
 
@@ -203,7 +215,7 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
     try writer.writeAll(ansi.clear_screen);
 
     if (entries.len == 0) {
-        try writer.writeAll("No listening TCP ports found.\n");
+        try writer.writeAll(emptyMessage(opts));
         return;
     }
 

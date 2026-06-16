@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const PortEntry = struct {
     port: u16,
     pid: u32,
@@ -85,4 +87,15 @@ fn ipv4MappedOctets(a: *const [16]u8) ?[4]u8 {
     }
     if (a[10] != 0xff or a[11] != 0xff) return null;
     return .{ a[12], a[13], a[14], a[15] };
+}
+
+/// Return a freshly owned slice of the network-reachable (non-loopback) entries,
+/// preserving order. The caller still owns `entries` and frees it separately.
+pub fn filterExposed(allocator: std.mem.Allocator, entries: []const PortEntry) ![]PortEntry {
+    var kept: std.ArrayList(PortEntry) = .empty;
+    errdefer kept.deinit(allocator);
+    for (entries) |e| {
+        if (scopeOf(&e) == .network) try kept.append(allocator, e);
+    }
+    return kept.toOwnedSlice(allocator);
 }
