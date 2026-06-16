@@ -42,7 +42,7 @@ pub fn main(init: std.process.Init) !void {
         const raw = try doScan(allocator, config.filter_port);
         if (!config.exposed) break :blk raw;
         defer allocator.free(raw);
-        break :blk try filterExposed(allocator, raw);
+        break :blk try types.filterExposed(allocator, raw);
     };
     defer allocator.free(entries);
 
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         @import("docker.zig").enrich(enrich_arena.allocator(), entries, init.io);
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
@@ -83,17 +83,6 @@ fn doScan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     } else {
         @compileError("Unsupported operating system");
     }
-}
-
-/// Return a freshly owned slice of the network-reachable (non-loopback) entries,
-/// preserving order. The caller still owns `entries` and frees it separately.
-fn filterExposed(allocator: std.mem.Allocator, entries: []const PortEntry) ![]PortEntry {
-    var kept: std.ArrayList(PortEntry) = .empty;
-    errdefer kept.deinit(allocator);
-    for (entries) |e| {
-        if (types.scopeOf(&e) == .network) try kept.append(allocator, e);
-    }
-    return kept.toOwnedSlice(allocator);
 }
 
 fn fatal(msg: []const u8) noreturn {
@@ -180,14 +169,14 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
         if (previous_arena) |*a| a.deinit();
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed };
 
     while (true) {
         var current_entries: ?[]PortEntry = blk: {
             const raw = try doScan(allocator, config.filter_port);
             if (!config.exposed) break :blk raw;
             defer allocator.free(raw);
-            break :blk try filterExposed(allocator, raw);
+            break :blk try types.filterExposed(allocator, raw);
         };
         errdefer if (current_entries) |entries| allocator.free(entries);
 

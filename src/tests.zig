@@ -209,6 +209,38 @@ test "scopeOf treats loopback as local and everything else as network" {
     }
 }
 
+test "filterExposed keeps only network listeners and preserves order" {
+    const entries = [_]PortEntry{
+        entryIPv4(5432, 1, "a", .{ 0, 0, 0, 0 }), // network
+        entryIPv4(3000, 2, "b", .{ 127, 0, 0, 1 }), // local — dropped
+        entryIPv4(8080, 3, "c", .{ 192, 168, 0, 9 }), // network
+    };
+    const kept = try types.filterExposed(std.testing.allocator, entries[0..]);
+    defer std.testing.allocator.free(kept);
+
+    try std.testing.expectEqual(@as(usize, 2), kept.len);
+    try std.testing.expectEqual(@as(u16, 5432), kept[0].port);
+    try std.testing.expectEqual(@as(u16, 8080), kept[1].port);
+
+    // All-loopback input yields an empty (but valid) slice.
+    const all_local = [_]PortEntry{entryIPv4(3000, 2, "b", .{ 127, 0, 0, 1 })};
+    const none = try types.filterExposed(std.testing.allocator, all_local[0..]);
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "table empty-state message reflects the exposed filter" {
+    var plain: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer plain.deinit();
+    try output.writeTable(&plain.writer, &.{}, .{});
+    try std.testing.expectEqualStrings("No listening TCP ports found.\n", plain.written());
+
+    var exposed: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer exposed.deinit();
+    try output.writeTable(&exposed.writer, &.{}, .{ .exposed = true });
+    try std.testing.expectEqualStrings("No network-reachable ports found.\n", exposed.written());
+}
+
 test "macOS scanner sees a real listening TCP socket" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
