@@ -12,6 +12,7 @@ _arguments -s -S \
   '--verbose[Show owning user and full command]' \
   '--tree[Show each listener parent-process chain]' \
   '--docker[Resolve Docker-owned ports to their container]' \
+  '--exposed[Show only ports reachable from the network]' \
   '(-v --version)'{-v,--version}'[Show version]' \
   '(-h --help)'{-h,--help}'[Show help]' \
   ':port or command:(version)'

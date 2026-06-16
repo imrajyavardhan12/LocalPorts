@@ -13,6 +13,7 @@ long_flags=(
   --verbose
   --tree
   --docker
+  --exposed
   --version
   --help
 )

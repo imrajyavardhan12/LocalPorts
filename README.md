@@ -24,6 +24,7 @@ Inspect local TCP ports: see what's listening, understand **why** (owning user, 
 - **Fast** — a single binary, ~3–5 ms warm scans on Apple Silicon, no daemon and no persistent state.
 - **Context** — owning user and full command line (`--verbose`), and each listener's parent-process chain (`--tree`).
 - **Docker-aware** — resolves a container-published port (owned by `com.docker.backend`) to the actual container name, image, and container-side port (`--docker`).
+- **Exposure-aware** — flags listeners reachable from the network (bound to a non-loopback address) and filters to just those with `--exposed`.
 - **Safe termination** — confirmation by default, refusal on ambiguous ports, and explicit `--all` / `--pid` / `--kill-pid` controls for intentional kills.
 - **Live watch** — color-coded refresh of listeners as they appear and disappear (`--watch`).
 - **Scriptable** — a stable default JSON contract; extra fields appear only behind their flag, so scripts keep working.
@@ -78,6 +79,7 @@ localports [options] [port]
 | `--verbose` | Show the owning user and full command line |
 | `--tree` | Show each listener's parent-process chain |
 | `--docker` | Resolve Docker-owned ports to their container |
+| `--exposed` | Show only ports reachable from the network (not loopback) |
 | `-w, --watch [secs]` | Live refresh, default every 2 seconds |
 | `-k, --kill <port>` | Kill the process on a port (refuses ambiguous matches) |
 | `-a, --all` | With `--kill <port>`: kill every matching process |
@@ -140,6 +142,27 @@ PORT   PID    PROCESS             ADDRESS    CONTAINER
 ```
 
 It runs `docker ps` once (only when a Docker-owned port is present) to map host port → container name, image, and container-side port. Non-Docker rows show `-`. If `docker` isn't installed or the daemon is down, the column stays `-` rather than erroring. Under `--json` it adds a `container` object (or `null`) per row.
+
+## Network exposure
+
+A listener bound to `127.0.0.1` (or `::1`) is reachable only from this machine. One bound to `0.0.0.0`, `::`, or a real interface address is reachable from your network — which is easy to do by accident (a dev database or debug server started with `--host 0.0.0.0`) and worth noticing.
+
+localports tags those rows so they stand out, and leaves loopback rows clean:
+
+```text
+PORT   PID    PROCESS   ADDRESS
+5432   900    postgres  0.0.0.0    ! network
+3000   123    node      127.0.0.1
+```
+
+`--exposed` filters a scan (or `--watch`) to just the network-reachable listeners — a quick "what on this machine is reachable from outside?" check, and handy in scripts as `localports --json --exposed`:
+
+```bash
+localports --exposed
+localports --json --exposed   # exits with an empty array if nothing is exposed
+```
+
+This reflects the **bind scope** only: a port bound to `0.0.0.0` may still be blocked by a firewall or NAT, so "network" means "reachable from your network", not "reachable from the internet".
 
 ## Watch mode
 

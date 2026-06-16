@@ -16,6 +16,11 @@ pub const ansi = struct {
     pub const clear_screen = "\x1b[H\x1b[J";
 };
 
+/// Trailing tag appended to a row whose listener is reachable from the network
+/// (bound to a non-loopback address). Local-only rows are left clean, so the
+/// signal is quiet until there is something worth noticing.
+const exposed_tag = "  ! network";
+
 /// Display toggles for scan output. New display modes go here so call sites
 /// stay self-documenting and the default contract is opt-in only.
 pub const Options = struct {
@@ -130,6 +135,7 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !v
                 try padWrite(writer, text, widths[ci]);
             }
         }
+        if (types.scopeOf(&e) == .network) try writer.writeAll(exposed_tag);
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
@@ -248,6 +254,7 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
                 try padWrite(writer, text, widths[ci]);
             }
         }
+        if (types.scopeOf(&e) == .network) try writer.writeAll(exposed_tag);
         try writer.writeAll(reset_color);
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);

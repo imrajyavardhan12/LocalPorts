@@ -18,6 +18,8 @@ pub const Config = struct {
     verbose: bool = false,
     tree: bool = false,
     docker: bool = false,
+    // Show only listeners reachable from the network (non-loopback bind).
+    exposed: bool = false,
     // Kill controls. `kill_all` and `kill_match_pid` refine `--kill <port>`;
     // `kill_pid` is a standalone `--kill-pid <pid>` target.
     kill_all: bool = false,
@@ -95,6 +97,8 @@ pub fn parseArgs(args: anytype) ParseResult {
             config.tree = true;
         } else if (std.mem.eql(u8, arg, "--docker")) {
             config.docker = true;
+        } else if (std.mem.eql(u8, arg, "--exposed")) {
+            config.exposed = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "version")) {
             config.action = .version;
             return .{ .config = config };

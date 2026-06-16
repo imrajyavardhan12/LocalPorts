@@ -38,7 +38,12 @@ pub fn main(init: std.process.Init) !void {
         .scan => {},
     }
 
-    const entries = try doScan(allocator, config.filter_port);
+    const entries = blk: {
+        const raw = try doScan(allocator, config.filter_port);
+        if (!config.exposed) break :blk raw;
+        defer allocator.free(raw);
+        break :blk try filterExposed(allocator, raw);
+    };
     defer allocator.free(entries);
 
     // Enriched fields (user/command/ancestors) are arena-backed; one deinit
@@ -78,6 +83,17 @@ fn doScan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     } else {
         @compileError("Unsupported operating system");
     }
+}
+
+/// Return a freshly owned slice of the network-reachable (non-loopback) entries,
+/// preserving order. The caller still owns `entries` and frees it separately.
+fn filterExposed(allocator: std.mem.Allocator, entries: []const PortEntry) ![]PortEntry {
+    var kept: std.ArrayList(PortEntry) = .empty;
+    errdefer kept.deinit(allocator);
+    for (entries) |e| {
+        if (types.scopeOf(&e) == .network) try kept.append(allocator, e);
+    }
+    return kept.toOwnedSlice(allocator);
 }
 
 fn fatal(msg: []const u8) noreturn {
@@ -123,6 +139,7 @@ fn printHelp(io: std.Io) void {
         \\  --verbose           Show user and full command (use sudo for all)
         \\  --tree              Show each listener's parent process chain
         \\  --docker            Resolve Docker-owned ports to their container
+        \\  --exposed           Show only ports reachable from the network (not loopback)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
@@ -166,7 +183,12 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
     const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker };
 
     while (true) {
-        var current_entries: ?[]PortEntry = try doScan(allocator, config.filter_port);
+        var current_entries: ?[]PortEntry = blk: {
+            const raw = try doScan(allocator, config.filter_port);
+            if (!config.exposed) break :blk raw;
+            defer allocator.free(raw);
+            break :blk try filterExposed(allocator, raw);
+        };
         errdefer if (current_entries) |entries| allocator.free(entries);
 
         // Enrich current entries with an arena (freed at the end of the next
