@@ -188,6 +188,27 @@ test "port-pid watch keys do not collide on pid low bits" {
     try std.testing.expect(types.portPidKey(3000, 1) != types.portPidKey(3000, 65537));
 }
 
+test "scopeOf treats loopback as local and everything else as network" {
+    const local = types.Scope.local;
+    const network = types.Scope.network;
+
+    const cases = .{
+        .{ entryIPv4(3000, 1, "n", .{ 127, 0, 0, 1 }), local },
+        .{ entryIPv4(3000, 1, "n", .{ 127, 4, 5, 6 }), local }, // 127.0.0.0/8
+        .{ entryIPv4(3000, 1, "n", .{ 0, 0, 0, 0 }), network }, // all interfaces
+        .{ entryIPv4(3000, 1, "n", .{ 192, 168, 1, 5 }), network }, // LAN
+        .{ entryIPv6(3000, 1, "n", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }), local }, // ::1
+        .{ entryIPv6(3000, 1, "n", .{0} ** 16), network }, // ::
+        // ::ffff:127.0.0.1 (IPv4-mapped loopback) and ::ffff:192.168.0.1
+        .{ entryIPv6(3000, 1, "n", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1 }), local },
+        .{ entryIPv6(3000, 1, "n", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 0, 1 }), network },
+    };
+    inline for (cases) |c| {
+        const e = c[0];
+        try std.testing.expectEqual(c[1], types.scopeOf(&e));
+    }
+}
+
 test "macOS scanner sees a real listening TCP socket" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -412,6 +433,23 @@ test "table output renders empty scans and IPv4 rows" {
     );
 }
 
+test "table tags network-bound listeners and leaves loopback rows clean" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const entries = [_]PortEntry{
+        entryIPv4(5432, 900, "postgres", .{ 0, 0, 0, 0 }),
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+    };
+    try output.writeTable(&writer.writer, entries[0..], .{});
+
+    const out = writer.written();
+    // The 0.0.0.0 row is tagged; the loopback row is not.
+    try std.testing.expect(std.mem.indexOf(u8, out, "0.0.0.0  ! network") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "127.0.0.1  ! network") == null);
+    try std.testing.expect(std.mem.count(u8, out, "! network") == 1);
+}
+
 test "JSON output renders valid fields and escapes process names" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -595,6 +633,20 @@ test "CLI parses docker flag" {
     const config = try expectConfig(cli.parseArgs(argv[0..]));
     try std.testing.expectEqual(cli.Action.scan, config.action);
     try std.testing.expect(config.docker);
+}
+
+test "CLI parses exposed flag in scan and watch" {
+    try std.testing.expect(!(try expectConfig(cli.parseArgs((&[_][]const u8{"localports"})[0..]))).exposed);
+
+    const scan = [_][]const u8{ "localports", "--exposed" };
+    const scan_config = try expectConfig(cli.parseArgs(scan[0..]));
+    try std.testing.expectEqual(cli.Action.scan, scan_config.action);
+    try std.testing.expect(scan_config.exposed);
+
+    const watch_argv = [_][]const u8{ "localports", "--watch", "--exposed" };
+    const watch_config = try expectConfig(cli.parseArgs(watch_argv[0..]));
+    try std.testing.expectEqual(cli.Action.watch, watch_config.action);
+    try std.testing.expect(watch_config.exposed);
 }
 
 test "docker isDockerProcess recognizes the Docker host processes" {

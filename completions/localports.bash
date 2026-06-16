@@ -6,7 +6,7 @@ _localports()
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="--port -p --json --watch -w --kill -k --all -a --pid --kill-pid --force -f --verbose --tree --docker --version -v --help -h version"
+    opts="--port -p --json --watch -w --kill -k --all -a --pid --kill-pid --force -f --verbose --tree --docker --exposed --version -v --help -h version"
 
     case "${prev}" in
         --port|-p|--kill|-k)

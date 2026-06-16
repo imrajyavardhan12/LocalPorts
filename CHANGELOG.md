@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- Network-exposure awareness. Listeners bound to a non-loopback address
+  (`0.0.0.0`, `::`, or a real interface address — reachable from your network)
+  are tagged `! network` in the table, while loopback-only rows stay clean. A new
+  `--exposed` flag filters a scan (or `--watch`) to just those network-reachable
+  listeners — a quick "what on this machine is reachable from outside?" check.
+  This reflects the bind scope only; a firewall may still block inbound traffic.
+
 ### Fixed
 
 - IPv6 addresses now display in their canonical RFC 5952 form (lowercase, leading

@@ -13,6 +13,7 @@
 .Op Fl -verbose
 .Op Fl -tree
 .Op Fl -docker
+.Op Fl -exposed
 .Nm
 .Fl w
 .Op Ar seconds
@@ -47,6 +48,13 @@ Some process details require ownership or root privileges.
 Show each listener's parent-process chain, immediate parent first.
 .It Fl -docker
 Resolve Docker-owned host ports to the publishing container.
+.It Fl -exposed
+Show only listeners reachable from the network, i.e. bound to a non-loopback
+address such as
+.Sy 0.0.0.0
+or
+.Sy :: .
+This reflects the bind scope; a firewall may still block inbound traffic.
 .It Fl w , Fl -watch Op Ar seconds
 Refresh continuously.
 The default interval is 2 seconds; values below 1 are clamped to 1.
