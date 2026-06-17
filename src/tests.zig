@@ -544,6 +544,35 @@ test "watch table state color is gated on the color option" {
     try std.testing.expect(std.mem.indexOf(u8, on.written(), "\x1b[32m") != null);
 }
 
+test "table truncates the long last column to the terminal width" {
+    const full = "/very/long/path/to/some/program --with --many --flags --here 12345";
+    var entries = [_]PortEntry{entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 })};
+    entries[0].user = "rvs";
+    entries[0].command = full;
+
+    var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer w.deinit();
+    try output.writeTable(&w.writer, entries[0..], .{ .verbose = true, .max_width = 50 });
+    const out = w.written();
+
+    // Truncated (ellipsis present, full command not shown), and no rendered line
+    // exceeds the width budget (each ellipsis is 3 bytes but one column).
+    try std.testing.expect(std.mem.indexOf(u8, out, "\u{2026}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, full) == null);
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const visible = line.len - 2 * std.mem.count(u8, line, "\u{2026}");
+        try std.testing.expect(visible <= 50);
+    }
+
+    // With no terminal width (piped), the full command is preserved.
+    var piped: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer piped.deinit();
+    try output.writeTable(&piped.writer, entries[0..], .{ .verbose = true });
+    try std.testing.expect(std.mem.indexOf(u8, piped.written(), full) != null);
+}
+
 test "JSON output renders valid fields and escapes process names" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();

@@ -8,6 +8,11 @@
   new/removed row colors are now gated the same way. Color is emitted only when
   stdout is a terminal; it is suppressed when piped or redirected, when the
   `NO_COLOR` environment variable is set, or with the new `--no-color` flag.
+- Long command lines are truncated to the terminal width so `--verbose` output
+  stays on one line per row. Truncation is from the middle (`head…tail`), which
+  keeps both the program name and trailing arguments such as a port. It applies
+  only when output is a terminal; piped/redirected output and `--json` keep the
+  full command.
 
 ## 0.6.1 - 2026-06-16
 
