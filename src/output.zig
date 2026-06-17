@@ -32,7 +32,31 @@ pub const Options = struct {
     exposed: bool = false,
     // Emit ANSI color. Decided by the caller (TTY + NO_COLOR + --no-color).
     color: bool = false,
+    // Terminal width for truncating the long last column. Null = no terminal
+    // (piped/redirected), so nothing is truncated and full text is emitted.
+    max_width: ?usize = null,
 };
+
+/// Write `text` clamped to `max` columns, collapsing the middle to a single
+/// ellipsis ("head…tail") when it is too long. Middle truncation keeps both the
+/// program name and trailing arguments (e.g. a port) — far more useful for a
+/// command line than chopping the end. ASCII is assumed for width (one byte ≈
+/// one column); cuts back off so a multi-byte sequence is never split.
+fn writeTruncatedMiddle(writer: anytype, text: []const u8, max: usize) !void {
+    // Fits, or too narrow for a meaningful "h…t" — emit as-is.
+    if (text.len <= max or max < 5) {
+        try writer.writeAll(text);
+        return;
+    }
+    const budget = max - 1; // one column for the ellipsis
+    var head = budget - budget / 2; // head gets the extra column on odd budgets
+    while (head > 0 and text[head] & 0xc0 == 0x80) head -= 1;
+    var tail_start = text.len - budget / 2;
+    while (tail_start < text.len and text[tail_start] & 0xc0 == 0x80) tail_start += 1;
+    try writer.writeAll(text[0..head]);
+    try writer.writeAll("\u{2026}");
+    try writer.writeAll(text[tail_start..]);
+}
 
 /// Write a plain cell (as returned by `columnCell`) for column `col`, coloring
 /// the `! network` exposure tag red when `color` is on. The color escapes are
@@ -170,17 +194,41 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !v
     }
     try writer.writeByte('\n');
 
+    // Columns available to the (unpadded) last column before the row would
+    // exceed the terminal: total width minus the 14-char PORT/PID prefix and the
+    // padded widths of every preceding column. Null when output is not a TTY.
+    const last_avail = lastColumnWidth(opts.max_width, widths[0..last]);
+
     // Rows.
     for (entries) |e| {
         try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
         for (columns, 0..) |col, ci| {
             const text = columnCell(col, &e, &cell_buf);
-            try writeCell(writer, col, text, opts.color);
-            if (ci != last) try padSpaces(writer, widths[ci] - text.len);
+            if (ci == last) {
+                // Truncate the long last column to the terminal width (color
+                // never applies here — it is only on the short ADDRESS cell).
+                if (last_avail != null and text.len > last_avail.?) {
+                    try writeTruncatedMiddle(writer, text, last_avail.?);
+                } else {
+                    try writeCell(writer, col, text, opts.color);
+                }
+            } else {
+                try writeCell(writer, col, text, opts.color);
+                try padSpaces(writer, widths[ci] - text.len);
+            }
         }
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
     }
+}
+
+/// Columns left for the last column after the fixed PORT/PID prefix (14) and the
+/// preceding columns' padded widths. Null when `max_width` is null.
+fn lastColumnWidth(max_width: ?usize, prior_widths: []const usize) ?usize {
+    const mw = max_width orelse return null;
+    var consumed: usize = 14;
+    for (prior_widths) |w| consumed += w;
+    return mw -| consumed;
 }
 
 pub fn writeJson(writer: anytype, entries: []const PortEntry, opts: Options) !void {
@@ -277,6 +325,8 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
     }
     try writer.writeByte('\n');
 
+    const last_avail = lastColumnWidth(opts.max_width, widths[0..last]);
+
     // Rows with state color coding (green new / red removed), gated on color.
     for (entries) |we| {
         const e = we.entry;
@@ -292,8 +342,12 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
         // uncolored here (a nested red would reset the row color mid-line).
         for (columns, 0..) |col, ci| {
             const text = columnCell(col, &e, &cell_buf);
-            try writer.writeAll(text);
-            if (ci != last) try padSpaces(writer, widths[ci] - text.len);
+            if (ci == last and last_avail != null and text.len > last_avail.?) {
+                try writeTruncatedMiddle(writer, text, last_avail.?);
+            } else {
+                try writer.writeAll(text);
+                if (ci != last) try padSpaces(writer, widths[ci] - text.len);
+            }
         }
         try writer.writeAll(reset_color);
         try writer.writeByte('\n');
@@ -412,5 +466,36 @@ test "formatIpv6 renders RFC 5952 canonical form" {
     inline for (cases) |c| {
         const addr: [16]u8 = c[0];
         try std.testing.expectEqualStrings(c[1], formatIpv6(&buf, &addr));
+    }
+}
+
+test "writeTruncatedMiddle collapses the middle and keeps head and tail" {
+    // Fits within max: emitted unchanged.
+    {
+        var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer w.deinit();
+        try writeTruncatedMiddle(&w.writer, "short", 20);
+        try std.testing.expectEqualStrings("short", w.written());
+    }
+    // Too narrow for a meaningful "h…t": emitted unchanged rather than mangled.
+    {
+        var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer w.deinit();
+        try writeTruncatedMiddle(&w.writer, "abcdefghij", 4);
+        try std.testing.expectEqualStrings("abcdefghij", w.written());
+    }
+    // Long text: head + ellipsis + tail, fitting within max columns.
+    {
+        var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer w.deinit();
+        const text = "python3 -m http.server 8000 --bind 127.0.0.1";
+        try writeTruncatedMiddle(&w.writer, text, 20);
+        const out = w.written();
+        try std.testing.expect(std.mem.indexOf(u8, out, "\u{2026}") != null);
+        try std.testing.expect(std.mem.startsWith(u8, out, "python"));
+        try std.testing.expect(std.mem.endsWith(u8, out, "127.0.0.1")); // trailing port/args kept
+        // Visible width is the byte length minus the 2 extra bytes of the
+        // 3-byte ellipsis (which is one column); it must fit within max.
+        try std.testing.expect(out.len - 2 <= 20);
     }
 }

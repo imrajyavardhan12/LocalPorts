@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         @import("docker.zig").enrich(enrich_arena.allocator(), entries, init.io);
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config) };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config), .max_width = terminalWidth() };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
@@ -94,6 +94,17 @@ fn useColor(config: cli.Config) bool {
         if (v[0] != 0) return false; // present and non-empty
     }
     return std.c.isatty(std.posix.STDOUT_FILENO) != 0;
+}
+
+const Winsize = extern struct { row: u16, col: u16, xpixel: u16, ypixel: u16 };
+
+/// The terminal's column count via TIOCGWINSZ on stdout, or null when stdout is
+/// not a terminal (piped/redirected) — in which case output is not truncated.
+fn terminalWidth() ?usize {
+    var ws: Winsize = undefined;
+    const TIOCGWINSZ: c_int = 0x40087468; // macOS: _IOR('t', 104, struct winsize)
+    if (std.c.ioctl(std.posix.STDOUT_FILENO, TIOCGWINSZ, &ws) != 0) return null;
+    return if (ws.col == 0) null else ws.col;
 }
 
 fn fatal(msg: []const u8) noreturn {
@@ -181,7 +192,7 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
         if (previous_arena) |*a| a.deinit();
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config) };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config), .max_width = terminalWidth() };
 
     while (true) {
         var current_entries: ?[]PortEntry = blk: {
