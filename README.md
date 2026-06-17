@@ -80,6 +80,7 @@ localports [options] [port]
 | `--tree` | Show each listener's parent-process chain |
 | `--docker` | Resolve Docker-owned ports to their container |
 | `--exposed` | Show only ports reachable from the network (not loopback) |
+| `--no-color` | Disable ANSI color (also honors `NO_COLOR`; auto-off when piped) |
 | `-w, --watch [secs]` | Live refresh, default every 2 seconds |
 | `-k, --kill <port>` | Kill the process on a port (refuses ambiguous matches) |
 | `-a, --all` | With `--kill <port>`: kill every matching process |
@@ -163,6 +164,8 @@ localports --json --exposed   # exits with an empty array if nothing is exposed
 ```
 
 This reflects the **bind scope** only: a port bound to `0.0.0.0` may still be blocked by a firewall or NAT, so "network" means "reachable from your network", not "reachable from the internet".
+
+In a terminal the `! network` tag is shown in red. Color is suppressed when output is piped or redirected, when `NO_COLOR` is set, or with `--no-color`.
 
 ## Watch mode
 

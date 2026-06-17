@@ -30,7 +30,29 @@ pub const Options = struct {
     // Whether the `--exposed` filter is active. Used only to tailor the
     // empty-state message ("nothing network-reachable" vs "nothing listening").
     exposed: bool = false,
+    // Emit ANSI color. Decided by the caller (TTY + NO_COLOR + --no-color).
+    color: bool = false,
 };
+
+/// Write a plain cell (as returned by `columnCell`) for column `col`, coloring
+/// the `! network` exposure tag red when `color` is on. The color escapes are
+/// zero-width, so the caller still pads by the plain `text.len` and alignment is
+/// preserved. Only the ADDRESS cell can carry the tag, so nothing else colors.
+fn writeCell(writer: anytype, col: Column, text: []const u8, color: bool) !void {
+    if (color and col == .address and std.mem.endsWith(u8, text, exposed_tag)) {
+        try writer.writeAll(text[0 .. text.len - exposed_tag.len]);
+        try writer.writeAll(ansi.red);
+        try writer.writeAll(exposed_tag);
+        try writer.writeAll(ansi.reset);
+    } else {
+        try writer.writeAll(text);
+    }
+}
+
+fn padSpaces(writer: anytype, n: usize) !void {
+    var i: usize = 0;
+    while (i < n) : (i += 1) try writer.writeByte(' ');
+}
 
 /// The empty-scan message, tailored to whether the `--exposed` filter is on so
 /// an empty audit reads as reassurance rather than "nothing is listening".
@@ -153,11 +175,8 @@ pub fn writeTable(writer: anytype, entries: []const PortEntry, opts: Options) !v
         try writer.print("{d:<6} {d:<6} ", .{ e.port, e.pid });
         for (columns, 0..) |col, ci| {
             const text = columnCell(col, &e, &cell_buf);
-            if (ci == last) {
-                try writer.writeAll(text);
-            } else {
-                try padWrite(writer, text, widths[ci]);
-            }
+            try writeCell(writer, col, text, opts.color);
+            if (ci != last) try padSpaces(writer, widths[ci] - text.len);
         }
         try writer.writeByte('\n');
         if (opts.tree) try writeAncestors(writer, e.ancestors);
@@ -258,24 +277,23 @@ pub fn writeWatchTable(writer: anytype, entries: []const WatchEntry, opts: Optio
     }
     try writer.writeByte('\n');
 
-    // Rows with color coding.
+    // Rows with state color coding (green new / red removed), gated on color.
     for (entries) |we| {
         const e = we.entry;
-        const color = switch (we.state) {
+        const color = if (opts.color) switch (we.state) {
             .new => ansi.green,
             .removed => ansi.red,
             .unchanged => "",
-        };
+        } else "";
         const reset_color = if (color.len > 0) ansi.reset else "";
 
         try writer.print("{s}{d:<6} {d:<6} ", .{ color, e.port, e.pid });
+        // The row already carries the state color, so the exposure tag is left
+        // uncolored here (a nested red would reset the row color mid-line).
         for (columns, 0..) |col, ci| {
             const text = columnCell(col, &e, &cell_buf);
-            if (ci == last) {
-                try writer.writeAll(text);
-            } else {
-                try padWrite(writer, text, widths[ci]);
-            }
+            try writer.writeAll(text);
+            if (ci != last) try padSpaces(writer, widths[ci] - text.len);
         }
         try writer.writeAll(reset_color);
         try writer.writeByte('\n');

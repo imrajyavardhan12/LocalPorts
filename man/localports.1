@@ -14,6 +14,7 @@
 .Op Fl -tree
 .Op Fl -docker
 .Op Fl -exposed
+.Op Fl -no-color
 .Nm
 .Fl w
 .Op Ar seconds
@@ -55,6 +56,12 @@ address such as
 or
 .Sy :: .
 This reflects the bind scope; a firewall may still block inbound traffic.
+.It Fl -no-color
+Disable ANSI color output.
+Color is otherwise emitted only when standard output is a terminal, and is
+suppressed when the
+.Sy NO_COLOR
+environment variable is set.
 .It Fl w , Fl -watch Op Ar seconds
 Refresh continuously.
 The default interval is 2 seconds; values below 1 are clamped to 1.

@@ -502,6 +502,48 @@ test "verbose table keeps the network tag beside the address, not at the row end
     try std.testing.expect(user < cmd);
 }
 
+test "table colors the exposure tag without disturbing layout" {
+    const entries = [_]PortEntry{
+        entryIPv4(5432, 900, "postgres", .{ 0, 0, 0, 0 }),
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+    };
+
+    var colored: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer colored.deinit();
+    try output.writeTable(&colored.writer, entries[0..], .{ .verbose = true, .color = true });
+
+    var plain: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer plain.deinit();
+    try output.writeTable(&plain.writer, entries[0..], .{ .verbose = true, .color = false });
+
+    // The tag is wrapped in red; the uncolored render carries no escapes.
+    try std.testing.expect(std.mem.indexOf(u8, colored.written(), "\x1b[31m  ! network\x1b[0m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain.written(), "\x1b[") == null);
+
+    // Stripping the escapes from the colored output reproduces the plain output
+    // exactly — proving the escapes are zero-width and alignment is untouched.
+    var stripped: std.ArrayList(u8) = .empty;
+    defer stripped.deinit(std.testing.allocator);
+    try stripAnsi(std.testing.allocator, &stripped, colored.written());
+    try std.testing.expectEqualStrings(plain.written(), stripped.items);
+}
+
+test "watch table state color is gated on the color option" {
+    const entries = [_]types.WatchEntry{
+        .{ .entry = entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }), .state = .new },
+    };
+
+    var off: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer off.deinit();
+    try output.writeWatchTable(&off.writer, entries[0..], .{ .color = false });
+    try std.testing.expect(std.mem.indexOf(u8, off.written(), "\x1b[32m") == null);
+
+    var on: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer on.deinit();
+    try output.writeWatchTable(&on.writer, entries[0..], .{ .color = true });
+    try std.testing.expect(std.mem.indexOf(u8, on.written(), "\x1b[32m") != null);
+}
+
 test "JSON output renders valid fields and escapes process names" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -701,6 +743,15 @@ test "CLI parses exposed flag in scan and watch" {
     try std.testing.expect(watch_config.exposed);
 }
 
+test "CLI parses no-color flag" {
+    try std.testing.expect(!(try expectConfig(cli.parseArgs((&[_][]const u8{"localports"})[0..]))).no_color);
+
+    const argv = [_][]const u8{ "localports", "--no-color" };
+    const config = try expectConfig(cli.parseArgs(argv[0..]));
+    try std.testing.expectEqual(cli.Action.scan, config.action);
+    try std.testing.expect(config.no_color);
+}
+
 test "docker isDockerProcess recognizes the Docker host processes" {
     try std.testing.expect(docker.isDockerProcess("com.docker.backend"));
     try std.testing.expect(docker.isDockerProcess("docker-proxy"));
@@ -821,6 +872,22 @@ fn expectFailure(expected: cli.ParseFailureKind, result: cli.ParseResult) !cli.P
             return failure;
         },
     };
+}
+
+/// Append `s` to `out` with CSI escape sequences (ESC [ ... final-byte) removed,
+/// for asserting that color escapes do not alter the visible layout.
+fn stripAnsi(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 0x1b and i + 1 < s.len and s[i + 1] == '[') {
+            i += 2;
+            while (i < s.len and (s[i] < 0x40 or s[i] > 0x7e)) : (i += 1) {} // params
+            if (i < s.len) i += 1; // final byte
+        } else {
+            try out.append(allocator, s[i]);
+            i += 1;
+        }
+    }
 }
 
 fn listenOnLoopbackEphemeralPort() !std.c.fd_t {
