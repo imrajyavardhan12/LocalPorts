@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Color output. The `! network` exposure tag is shown in red, and watch mode's
+  new/removed row colors are now gated the same way. Color is emitted only when
+  stdout is a terminal; it is suppressed when piped or redirected, when the
+  `NO_COLOR` environment variable is set, or with the new `--no-color` flag.
+
 ## 0.6.1 - 2026-06-16
 
 ### Fixed

@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
         @import("docker.zig").enrich(enrich_arena.allocator(), entries, init.io);
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config) };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
@@ -83,6 +83,17 @@ fn doScan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
     } else {
         @compileError("Unsupported operating system");
     }
+}
+
+/// Decide whether to emit ANSI color: never with `--no-color`, never when
+/// NO_COLOR is set to a non-empty value (https://no-color.org), and otherwise
+/// only when stdout is a terminal (so piped/redirected output stays clean).
+fn useColor(config: cli.Config) bool {
+    if (config.no_color) return false;
+    if (std.c.getenv("NO_COLOR")) |v| {
+        if (v[0] != 0) return false; // present and non-empty
+    }
+    return std.c.isatty(std.posix.STDOUT_FILENO) != 0;
 }
 
 fn fatal(msg: []const u8) noreturn {
@@ -129,6 +140,7 @@ fn printHelp(io: std.Io) void {
         \\  --tree              Show each listener's parent process chain
         \\  --docker            Resolve Docker-owned ports to their container
         \\  --exposed           Show only ports reachable from the network (not loopback)
+        \\  --no-color          Disable ANSI color (also honors NO_COLOR; auto-off when piped)
         \\  --version, -v       Show version
         \\  --help, -h          Show this help
         \\
@@ -169,7 +181,7 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
         if (previous_arena) |*a| a.deinit();
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config) };
 
     while (true) {
         var current_entries: ?[]PortEntry = blk: {

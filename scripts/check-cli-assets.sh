@@ -14,6 +14,7 @@ long_flags=(
   --tree
   --docker
   --exposed
+  --no-color
   --version
   --help
 )
