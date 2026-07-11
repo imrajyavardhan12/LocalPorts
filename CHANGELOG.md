@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Incomplete-scan diagnostics for interactive table output. Saturated libproc
+  buffers are retried, warnings are aggregated, JSON output remains clean, and
+  port-based kills refuse confirmed truncation.
+- A pull-request performance gate that compares ReleaseFast scan latency with
+  the base revision and reruns suspected regressions once.
+
+### Changed
+
+- Distinct IPv4, IPv6, interface, and scoped listener endpoints are now
+  preserved as separate rows; only exact duplicate descriptors are collapsed.
+- Watch mode tracks complete endpoints, so address changes appear as removed
+  and new rows.
+- Port-based kill actions deduplicate endpoint rows by PID so each process is
+  prompted for and signalled at most once.
+- Docker enrichment now prefers exact host-address mappings and leaves
+  conflicting same-port mappings unresolved instead of guessing. UDP
+  publications are ignored because localports reports TCP listeners.
+
 ## 0.7.0 - 2026-06-17
 
 ### Added

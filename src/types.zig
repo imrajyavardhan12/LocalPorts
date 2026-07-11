@@ -8,6 +8,7 @@ pub const PortEntry = struct {
     addr4: [4]u8,
     addr6: [16]u8,
     is_ipv6: bool,
+    scope_id: u32 = 0,
     // Verbose-only fields, populated on demand by the platform backend's
     // enrich step. Null means not requested or not available (e.g. another
     // user's process without sudo). Backed by a caller-owned arena.
@@ -46,8 +47,59 @@ pub const WatchEntry = struct {
     state: RowState,
 };
 
-pub fn portPidKey(port: u16, pid: u32) u64 {
-    return (@as(u64, port) << 32) | @as(u64, pid);
+pub const ScanDiagnostics = struct {
+    inaccessible_processes: usize = 0,
+    malformed_results: usize = 0,
+    truncated: bool = false,
+
+    pub fn mayBeIncomplete(diagnostics: ScanDiagnostics) bool {
+        return diagnostics.inaccessible_processes > 0 or
+            diagnostics.malformed_results > 0 or
+            diagnostics.truncated;
+    }
+};
+
+pub const ScanResult = struct {
+    entries: []PortEntry,
+    diagnostics: ScanDiagnostics,
+};
+
+pub const ListenerKey = struct {
+    port: u16,
+    pid: u32,
+    is_ipv6: bool,
+    address: [16]u8,
+    scope_id: u32,
+};
+
+pub fn listenerKey(entry: *const PortEntry) ListenerKey {
+    var address = [_]u8{0} ** 16;
+    if (entry.is_ipv6) {
+        address = entry.addr6;
+    } else {
+        @memcpy(address[0..4], &entry.addr4);
+    }
+    return .{
+        .port = entry.port,
+        .pid = entry.pid,
+        .is_ipv6 = entry.is_ipv6,
+        .address = address,
+        .scope_id = if (entry.is_ipv6) entry.scope_id else 0,
+    };
+}
+
+pub fn listenerLessThan(_: void, a: PortEntry, b: PortEntry) bool {
+    const a_key = listenerKey(&a);
+    const b_key = listenerKey(&b);
+    if (a_key.port != b_key.port) return a_key.port < b_key.port;
+    if (a_key.pid != b_key.pid) return a_key.pid < b_key.pid;
+    if (a_key.is_ipv6 != b_key.is_ipv6) return !a_key.is_ipv6;
+    switch (std.mem.order(u8, &a_key.address, &b_key.address)) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    return a_key.scope_id < b_key.scope_id;
 }
 
 /// Where a listener is reachable from, derived from its bind address.

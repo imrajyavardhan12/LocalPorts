@@ -193,6 +193,13 @@ pub fn processName(pid: u32, buf: *[256]u8) ?usize {
     return if (nlen > 0) @intCast(nlen) else null;
 }
 
+fn processExistsForDiagnostics(pid: u32) bool {
+    std.posix.kill(@intCast(pid), @enumFromInt(0)) catch |err| {
+        return err != error.ProcessNotFound;
+    };
+    return true;
+}
+
 // ── Enrichment (verbose: user + command; tree: ancestry) ──────────────────
 
 /// Populate on-demand fields of each entry: `user`/`command` when `verbose`,
@@ -204,13 +211,32 @@ pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tre
     // Reusable scratch buffer for KERN_PROCARGS2, sized to kern.argmax. Only
     // needed for the verbose command lookup.
     const scratch: ?[]u8 = if (verbose) (arena.alloc(u8, sysctlArgmax() orelse 4096) catch null) else null;
+    const Details = struct {
+        user: ?[]const u8 = null,
+        command: ?[]const u8 = null,
+        ancestors: ?[]const Ancestor = null,
+    };
+    var by_pid: std.AutoHashMapUnmanaged(u32, Details) = .empty;
+    defer by_pid.deinit(arena);
 
     for (entries) |*e| {
-        if (verbose) {
-            e.user = lookupUser(arena, e.pid);
-            if (scratch) |s| e.command = lookupCommand(arena, s, e.pid);
+        if (by_pid.get(e.pid)) |details| {
+            e.user = details.user;
+            e.command = details.command;
+            e.ancestors = details.ancestors;
+            continue;
         }
-        if (tree) e.ancestors = fillAncestors(arena, e.pid);
+
+        var details: Details = .{};
+        if (verbose) {
+            details.user = lookupUser(arena, e.pid);
+            if (scratch) |s| details.command = lookupCommand(arena, s, e.pid);
+        }
+        if (tree) details.ancestors = fillAncestors(arena, e.pid);
+        by_pid.put(arena, e.pid, details) catch {};
+        e.user = details.user;
+        e.command = details.command;
+        e.ancestors = details.ancestors;
     }
 }
 
@@ -308,6 +334,7 @@ const DecodedListen = struct {
     is_ipv6: bool,
     addr4: [4]u8,
     addr6: [16]u8,
+    scope_id: u32,
 };
 
 /// Decode a `socket_fdinfo` into a listening-TCP descriptor, or null if the
@@ -335,13 +362,23 @@ fn decodeListenSocket(sfi: *const SocketFdInfo) ?DecodedListen {
         .is_ipv6 = false,
         .addr4 = .{ 0, 0, 0, 0 },
         .addr6 = .{0} ** 16,
+        .scope_id = 0,
     };
 
-    if (ini.insi_vflag & INI_IPV4 != 0) {
+    if (si.soi_family == std.c.AF.INET and ini.insi_vflag & INI_IPV4 != 0) {
         @memcpy(&decoded.addr4, std.mem.asBytes(&ini.insi_laddr.in46.addr4));
-    } else if (ini.insi_vflag & INI_IPV6 != 0) {
+    } else if (si.soi_family == std.c.AF.INET6 and ini.insi_vflag & INI_IPV6 != 0) {
         @memcpy(&decoded.addr6, std.mem.asBytes(&ini.insi_laddr.in6.words));
         decoded.is_ipv6 = true;
+        decoded.scope_id = ini.insi_v6.in6_ifindex;
+        if (decoded.addr6[0] == 0xfe and decoded.addr6[1] & 0xc0 == 0x80) {
+            const embedded_scope = std.mem.readInt(u16, decoded.addr6[2..4], .big);
+            decoded.addr6[2] = 0;
+            decoded.addr6[3] = 0;
+            if (decoded.scope_id == 0) decoded.scope_id = embedded_scope;
+        }
+    } else {
+        return null;
     }
 
     return decoded;
@@ -356,27 +393,43 @@ const pid_query_headroom = 64;
 const fd_query_headroom = 32;
 // Initial FD buffer size, grown on demand for processes with more descriptors.
 const fd_initial_capacity = 256;
+const query_retry_limit = 3;
 
 pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
+    return (try scanReporting(allocator, filter_port)).entries;
+}
+
+pub fn scanReporting(allocator: std.mem.Allocator, filter_port: ?u16) !types.ScanResult {
+    var diagnostics: types.ScanDiagnostics = .{};
+
     // Size the PID buffer dynamically. proc_listallpids(null, 0) reports how
     // many PIDs currently exist; we add headroom because processes can spawn
     // between this query and the fill below. A fixed buffer would silently
     // truncate on busy systems and make listeners vanish from the scan.
     const pid_hint = proc_listallpids(null, 0);
     if (pid_hint <= 0) return error.ProcListPidsFailed;
-    const pid_capacity: usize = @as(usize, @intCast(pid_hint)) + pid_query_headroom;
-
-    const pid_buf = try allocator.alloc(i32, pid_capacity);
+    var pid_buf = try allocator.alloc(i32, @as(usize, @intCast(pid_hint)) + pid_query_headroom);
     defer allocator.free(pid_buf);
 
-    const pid_filled = proc_listallpids(@ptrCast(pid_buf.ptr), @intCast(pid_capacity * @sizeOf(i32)));
+    var pid_filled: c_int = 0;
+    var pid_attempt: usize = 0;
+    while (pid_attempt < query_retry_limit) : (pid_attempt += 1) {
+        pid_filled = proc_listallpids(@ptrCast(pid_buf.ptr), @intCast(pid_buf.len * @sizeOf(i32)));
+        if (pid_filled <= 0) return error.ProcListPidsFailed;
+        if (@as(usize, @intCast(pid_filled)) < pid_buf.len) break;
+        if (pid_attempt + 1 == query_retry_limit) {
+            diagnostics.truncated = true;
+            break;
+        }
+        pid_buf = try allocator.realloc(pid_buf, pid_buf.len * 2);
+    }
     if (pid_filled <= 0) return error.ProcListPidsFailed;
-    const n_pids: usize = @min(@as(usize, @intCast(pid_filled)), pid_capacity);
+    const n_pids: usize = @min(@as(usize, @intCast(pid_filled)), pid_buf.len);
 
     var entries: std.ArrayList(PortEntry) = .empty;
     errdefer entries.deinit(allocator);
 
-    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    var seen: std.AutoHashMapUnmanaged(types.ListenerKey, void) = .empty;
     defer seen.deinit(allocator);
 
     // Reusable FD buffer, grown on demand so a process with many descriptors
@@ -391,21 +444,49 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
 
         // Size this PID's FD list, growing the shared buffer if needed.
         const fd_needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, null, 0);
-        if (fd_needed <= 0) continue;
+        if (fd_needed <= 0) {
+            if (processExistsForDiagnostics(@intCast(pid))) diagnostics.inaccessible_processes += 1;
+            continue;
+        }
+        if (@mod(@as(usize, @intCast(fd_needed)), @sizeOf(ProcFdInfo)) != 0) {
+            diagnostics.malformed_results += 1;
+            continue;
+        }
         const fd_needed_count: usize = @intCast(@divTrunc(fd_needed, @sizeOf(ProcFdInfo)));
         if (fd_needed_count + fd_query_headroom > fd_buf.len) {
             fd_buf = try allocator.realloc(fd_buf, fd_needed_count + fd_query_headroom);
         }
 
-        const fd_bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, @ptrCast(fd_buf.ptr), @intCast(fd_buf.len * @sizeOf(ProcFdInfo)));
+        var fd_bytes: c_int = 0;
+        var fd_attempt: usize = 0;
+        while (fd_attempt < query_retry_limit) : (fd_attempt += 1) {
+            fd_bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, @ptrCast(fd_buf.ptr), @intCast(fd_buf.len * @sizeOf(ProcFdInfo)));
+            if (fd_bytes <= 0) break;
+            const filled_count: usize = @intCast(@divTrunc(fd_bytes, @sizeOf(ProcFdInfo)));
+            if (filled_count < fd_buf.len) break;
+            if (fd_attempt + 1 == query_retry_limit) {
+                diagnostics.truncated = true;
+                break;
+            }
+            fd_buf = try allocator.realloc(fd_buf, fd_buf.len * 2);
+        }
         if (fd_bytes <= 0) continue;
+        if (@mod(@as(usize, @intCast(fd_bytes)), @sizeOf(ProcFdInfo)) != 0) {
+            diagnostics.malformed_results += 1;
+            continue;
+        }
         const n_fds: usize = @min(@as(usize, @intCast(@divTrunc(fd_bytes, @sizeOf(ProcFdInfo)))), fd_buf.len);
 
+        var process_name: [256]u8 = undefined;
+        var process_name_len: ?usize = null;
         for (fd_buf[0..n_fds]) |fdi| {
             if (fdi.proc_fdtype != PROX_FDTYPE_SOCKET) continue;
 
             const r = proc_pidfdinfo(pid, fdi.proc_fd, PROC_PIDFDSOCKETINFO, @ptrCast(&sfi), @intCast(@sizeOf(SocketFdInfo)));
-            if (r < @sizeOf(SocketFdInfo)) continue;
+            if (r < @sizeOf(SocketFdInfo)) {
+                if (r > 0) diagnostics.malformed_results += 1;
+                continue;
+            }
 
             const decoded = decodeListenSocket(&sfi) orelse continue;
 
@@ -413,13 +494,7 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
                 if (decoded.port != fp) continue;
             }
 
-            // Deduplicate on (pid, port) to avoid IPv4+IPv6 double-listing.
             const pid_u32: u32 = @intCast(pid);
-            const key = types.portPidKey(decoded.port, pid_u32);
-            const seen_entry = try seen.getOrPut(allocator, key);
-            if (seen_entry.found_existing) continue;
-            seen_entry.value_ptr.* = {};
-
             var entry = PortEntry{
                 .port = decoded.port,
                 .pid = pid_u32,
@@ -428,29 +503,33 @@ pub fn scan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
                 .addr4 = decoded.addr4,
                 .addr6 = decoded.addr6,
                 .is_ipv6 = decoded.is_ipv6,
+                .scope_id = decoded.scope_id,
             };
 
-            // Resolve process name.
-            const nlen = proc_name(pid, @ptrCast(&entry.name), @sizeOf(@TypeOf(entry.name)));
-            entry.name_len = if (nlen > 0) @intCast(nlen) else 0;
-            if (nlen <= 0) {
-                entry.name[0] = '?';
-                entry.name_len = 1;
+            const seen_entry = try seen.getOrPut(allocator, types.listenerKey(&entry));
+            if (seen_entry.found_existing) continue;
+            seen_entry.value_ptr.* = {};
+
+            if (process_name_len == null) {
+                process_name_len = processName(pid_u32, &process_name);
+                if (process_name_len == null) {
+                    process_name[0] = '?';
+                    process_name_len = 1;
+                }
             }
+            entry.name = process_name;
+            entry.name_len = process_name_len.?;
 
             try entries.append(allocator, entry);
         }
     }
 
-    // Sort by port, then PID.
-    std.mem.sort(PortEntry, entries.items, {}, struct {
-        fn lt(_: void, a: PortEntry, b: PortEntry) bool {
-            if (a.port != b.port) return a.port < b.port;
-            return a.pid < b.pid;
-        }
-    }.lt);
+    std.mem.sort(PortEntry, entries.items, {}, types.listenerLessThan);
 
-    return try entries.toOwnedSlice(allocator);
+    return .{
+        .entries = try entries.toOwnedSlice(allocator),
+        .diagnostics = diagnostics,
+    };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -472,6 +551,7 @@ test "bsdProcessName falls back to pbi_name when pbi_comm is empty" {
 fn makeSocketFdInfo(kind: i32, state: i32, vflag: u8, port: u16) SocketFdInfo {
     var sfi = std.mem.zeroes(SocketFdInfo);
     sfi.psi.soi_kind = kind;
+    sfi.psi.soi_family = if (vflag == INI_IPV6) std.c.AF.INET6 else std.c.AF.INET;
     const tcp = &sfi.psi.soi_proto.pri_tcp;
     tcp.tcpsi_state = state;
     tcp.tcpsi_ini.insi_vflag = vflag;
@@ -495,6 +575,7 @@ test "decodeListenSocket accepts a listening IPv4 TCP socket" {
 
 test "decodeListenSocket accepts a listening IPv6 TCP socket" {
     var sfi = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV6, 8080);
+    sfi.psi.soi_proto.pri_tcp.tcpsi_ini.insi_v6.in6_ifindex = 7;
     const addr = [_]u8{
         0x20, 0x01, 0x0d, 0xb8,
         0x00, 0x00, 0x00, 0x00,
@@ -510,6 +591,30 @@ test "decodeListenSocket accepts a listening IPv6 TCP socket" {
     try std.testing.expectEqual(@as(u16, 8080), decoded.port);
     try std.testing.expect(decoded.is_ipv6);
     try std.testing.expectEqual(addr, decoded.addr6);
+    try std.testing.expectEqual(@as(u32, 7), decoded.scope_id);
+}
+
+test "decodeListenSocket extracts an embedded link-local IPv6 scope" {
+    var sfi = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV6, 8080);
+    const kernel_addr = [_]u8{
+        0xfe, 0x80, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    };
+    @memcpy(
+        std.mem.asBytes(&sfi.psi.soi_proto.pri_tcp.tcpsi_ini.insi_laddr.in6.words),
+        &kernel_addr,
+    );
+
+    const decoded = decodeListenSocket(&sfi) orelse return error.ExpectedDecode;
+    try std.testing.expectEqual([_]u8{
+        0xfe, 0x80, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    }, decoded.addr6);
+    try std.testing.expectEqual(@as(u32, 7), decoded.scope_id);
 }
 
 test "decodeListenSocket rejects non-TCP, non-listening, and port-zero sockets" {
@@ -521,4 +626,8 @@ test "decodeListenSocket rejects non-TCP, non-listening, and port-zero sockets" 
 
     const port_zero = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV4, 0);
     try std.testing.expectEqual(@as(?DecodedListen, null), decodeListenSocket(&port_zero));
+
+    var unsupported_family = makeSocketFdInfo(SOCKINFO_TCP, TSI_S_LISTEN, INI_IPV4, 3000);
+    unsupported_family.psi.soi_family = std.c.AF.UNIX;
+    try std.testing.expectEqual(@as(?DecodedListen, null), decodeListenSocket(&unsupported_family));
 }

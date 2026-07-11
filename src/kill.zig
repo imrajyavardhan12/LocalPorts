@@ -1,3 +1,4 @@
+const std = @import("std");
 const docker = @import("docker.zig");
 const types = @import("types.zig");
 const PortEntry = types.PortEntry;
@@ -26,6 +27,23 @@ pub const KillResolution = union(enum) {
     /// Kill all of `entries`; the value is the count.
     many: usize,
 };
+
+pub fn uniqueProcessTargets(allocator: std.mem.Allocator, entries: []const PortEntry) ![]PortEntry {
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(allocator);
+
+    var targets: std.ArrayList(PortEntry) = .empty;
+    errdefer targets.deinit(allocator);
+
+    for (entries) |entry| {
+        const result = try seen.getOrPut(allocator, entry.pid);
+        if (result.found_existing) continue;
+        result.value_ptr.* = {};
+        try targets.append(allocator, entry);
+    }
+
+    return targets.toOwnedSlice(allocator);
+}
 
 pub fn resolve(entries: []const PortEntry, mode: KillMode) KillResolution {
     if (entries.len == 0) return .none;

@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -48,6 +50,25 @@ jobs:
 
       - name: Test
         run: zig build test
+
+      - name: Check scan performance
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          baseline_src="${RUNNER_TEMP}/localports-baseline"
+          baseline_prefix="${RUNNER_TEMP}/localports-baseline-build"
+          candidate_prefix="${RUNNER_TEMP}/localports-candidate-build"
+          git worktree add --detach "${baseline_src}" "${BASE_SHA}"
+          (
+            cd "${baseline_src}"
+            zig build -Doptimize=ReleaseFast --prefix "${baseline_prefix}"
+          )
+          zig build -Doptimize=ReleaseFast --prefix "${candidate_prefix}"
+          python3 scripts/check-performance.py \
+            --baseline "${baseline_prefix}/bin/localports" \
+            --candidate "${candidate_prefix}/bin/localports"
 
       - name: Smoke test help
         run: ./zig-out/bin/localports --help
