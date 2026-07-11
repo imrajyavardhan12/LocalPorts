@@ -14,7 +14,9 @@ mkdir -p "$out_dir"
 rm -f "$out_dir"/localports-*-macos.tar.gz
 
 # Zig target triples; the arch label is derived by stripping "-macos".
-targets=(aarch64-macos x86_64-macos)
+# Release CI sets LOCALPORTS_RELEASE_TARGETS to package only the runner-native
+# architecture. Local packaging retains both targets by default.
+read -r -a targets <<< "${LOCALPORTS_RELEASE_TARGETS:-aarch64-macos x86_64-macos}"
 
 for ztarget in "${targets[@]}"; do
   arch="${ztarget%-macos}"

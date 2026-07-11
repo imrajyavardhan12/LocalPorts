@@ -21,12 +21,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
         with:
           fetch-depth: 0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
 
@@ -44,6 +44,16 @@ jobs:
           if command -v fish >/dev/null; then fish -n completions/localports.fish; fi
           mandoc -Tlint man/localports.1
           ruby -c Formula/localports.rb
+
+      - name: Check release automation
+        run: |
+          bash -n scripts/package-release.sh
+          bash -n scripts/release-preflight.sh
+          bash -n scripts/render-homebrew-formula.sh
+          bash -n scripts/sync-homebrew-tap.sh
+          bash -n scripts/verify-release-archive.sh
+          python3 -m py_compile scripts/create-release-manifest.py scripts/check-performance.py
+          ruby -e 'require "yaml"; YAML.load_file(".github/workflows/release.yml")'
 
       - name: Build
         run: zig build -Doptimize=ReleaseFast
