@@ -183,9 +183,43 @@ test "CLI reports invalid input" {
     try std.testing.expectEqualStrings("--wat", failure.arg.?);
 }
 
-test "port-pid watch keys do not collide on pid low bits" {
-    try std.testing.expectEqual((@as(u64, 3000) << 32) | 1, types.portPidKey(3000, 1));
-    try std.testing.expect(types.portPidKey(3000, 1) != types.portPidKey(3000, 65537));
+test "listener identity preserves distinct addresses for one process and port" {
+    const loopback = entryIPv4(3000, 100, "node", .{ 127, 0, 0, 1 });
+    const wildcard = entryIPv4(3000, 100, "node", .{ 0, 0, 0, 0 });
+    const ipv6 = entryIPv6(3000, 100, "node", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+
+    try std.testing.expect(!std.meta.eql(types.listenerKey(&loopback), types.listenerKey(&wildcard)));
+    try std.testing.expect(!std.meta.eql(types.listenerKey(&loopback), types.listenerKey(&ipv6)));
+    try std.testing.expectEqual(types.listenerKey(&loopback), types.listenerKey(&loopback));
+}
+
+test "listener identity preserves IPv6 scope" {
+    var first = entryIPv6(3000, 100, "node", .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    var second = first;
+    first.scope_id = 1;
+    second.scope_id = 2;
+
+    try std.testing.expect(!std.meta.eql(types.listenerKey(&first), types.listenerKey(&second)));
+}
+
+test "listener ordering is deterministic across addresses and scopes" {
+    var scoped_two = entryIPv6(3000, 100, "node", .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    scoped_two.scope_id = 2;
+    var scoped_one = scoped_two;
+    scoped_one.scope_id = 1;
+    var entries = [_]PortEntry{
+        scoped_two,
+        entryIPv4(3000, 100, "node", .{ 127, 0, 0, 1 }),
+        scoped_one,
+        entryIPv4(3000, 100, "node", .{ 0, 0, 0, 0 }),
+    };
+
+    std.mem.sort(PortEntry, &entries, {}, types.listenerLessThan);
+
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, entries[0].addr4);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, entries[1].addr4);
+    try std.testing.expectEqual(@as(u32, 1), entries[2].scope_id);
+    try std.testing.expectEqual(@as(u32, 2), entries[3].scope_id);
 }
 
 test "scopeOf treats loopback as local and everything else as network" {
@@ -241,6 +275,29 @@ test "table empty-state message reflects the exposed filter" {
     try std.testing.expectEqualStrings("No network-reachable ports found.\n", exposed.written());
 }
 
+test "scan diagnostics render one aggregate warning" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    try output.writeScanWarning(&writer.writer, .{
+        .inaccessible_processes = 2,
+        .malformed_results = 1,
+        .truncated = true,
+    });
+
+    const warning = writer.written();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, warning, "warning:"));
+    try std.testing.expect(std.mem.indexOf(u8, warning, "2 processes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warning, "1 malformed result") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warning, "saturated after retries") != null);
+    try std.testing.expect(std.mem.indexOf(u8, warning, "try sudo") != null);
+
+    var complete: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer complete.deinit();
+    try output.writeScanWarning(&complete.writer, .{});
+    try std.testing.expectEqual(@as(usize, 0), complete.written().len);
+}
+
 test "macOS scanner sees a real listening TCP socket" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -261,6 +318,81 @@ test "macOS scanner sees a real listening TCP socket" {
     }
 
     return error.ExpectedScannerEntry;
+}
+
+test "macOS scanner preserves IPv4 and IPv6 listeners for one process and port" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const fd4 = try listenOnLoopbackEphemeralPort();
+    defer _ = std.c.close(fd4);
+    const port = try boundPort(fd4);
+
+    const fd6 = try listenOnIpv6Port(port, .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    defer _ = std.c.close(fd6);
+
+    const entries = try @import("darwin.zig").scan(std.testing.allocator, port);
+    defer std.testing.allocator.free(entries);
+
+    const pid: u32 = @intCast(std.c.getpid());
+    var found_ipv4 = false;
+    var found_ipv6 = false;
+    for (entries) |entry| {
+        if (entry.pid != pid or entry.port != port) continue;
+        if (entry.is_ipv6) {
+            found_ipv6 = std.mem.eql(u8, &entry.addr6, &([_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }));
+        } else {
+            found_ipv4 = std.mem.eql(u8, &entry.addr4, &([_]u8{ 127, 0, 0, 1 }));
+        }
+    }
+
+    try std.testing.expect(found_ipv4);
+    try std.testing.expect(found_ipv6);
+}
+
+test "macOS scanner collapses duplicated socket descriptors" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const fd = try listenOnLoopbackEphemeralPort();
+    defer _ = std.c.close(fd);
+    const duplicate = std.c.dup(fd);
+    if (duplicate < 0) return error.DupFailed;
+    defer _ = std.c.close(duplicate);
+
+    const port = try boundPort(fd);
+    const entries = try @import("darwin.zig").scan(std.testing.allocator, port);
+    defer std.testing.allocator.free(entries);
+
+    const pid: u32 = @intCast(std.c.getpid());
+    var matches: usize = 0;
+    for (entries) |entry| {
+        if (entry.pid == pid and entry.port == port) matches += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), matches);
+}
+
+test "exposed filtering preserves a network sibling of a loopback listener" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    const fd4 = try listenOnLoopbackEphemeralPort();
+    defer _ = std.c.close(fd4);
+    const port = try boundPort(fd4);
+    const fd6 = try listenOnIpv6Port(port, .{0} ** 16);
+    defer _ = std.c.close(fd6);
+
+    const entries = try @import("darwin.zig").scan(std.testing.allocator, port);
+    defer std.testing.allocator.free(entries);
+    const exposed = try types.filterExposed(std.testing.allocator, entries);
+    defer std.testing.allocator.free(exposed);
+
+    const pid: u32 = @intCast(std.c.getpid());
+    var process_rows: usize = 0;
+    for (exposed) |entry| {
+        if (entry.pid != pid) continue;
+        process_rows += 1;
+        try std.testing.expect(entry.is_ipv6);
+        try std.testing.expectEqual([_]u8{0} ** 16, entry.addr6);
+    }
+    try std.testing.expectEqual(@as(usize, 1), process_rows);
 }
 
 test "watch classification detects new removed and unchanged rows" {
@@ -298,6 +430,34 @@ test "watch classification reports no changes for stable rows" {
 
     try std.testing.expect(!watch.hasChanges(classified));
     try std.testing.expectEqual(types.RowState.unchanged, classified[0].state);
+}
+
+test "watch classification treats an address change as removed and new" {
+    const previous = [_]PortEntry{entryIPv4(3000, 100, "node", .{ 127, 0, 0, 1 })};
+    const current = [_]PortEntry{entryIPv4(3000, 100, "node", .{ 0, 0, 0, 0 })};
+
+    const classified = try watch.classify(std.testing.allocator, previous[0..], current[0..]);
+    defer std.testing.allocator.free(classified);
+
+    try std.testing.expectEqual(@as(usize, 2), classified.len);
+    try std.testing.expectEqual(types.RowState.new, classified[0].state);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, classified[0].entry.addr4);
+    try std.testing.expectEqual(types.RowState.removed, classified[1].state);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, classified[1].entry.addr4);
+}
+
+test "watch classification keeps sibling endpoints independently stable" {
+    const previous = [_]PortEntry{
+        entryIPv4(3000, 100, "node", .{ 127, 0, 0, 1 }),
+        entryIPv6(3000, 100, "node", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
+    };
+    const current = previous;
+
+    const classified = try watch.classify(std.testing.allocator, &previous, &current);
+    defer std.testing.allocator.free(classified);
+
+    try std.testing.expectEqual(@as(usize, 2), classified.len);
+    try std.testing.expect(!watch.hasChanges(classified));
 }
 
 test "watch table renders verbose columns" {
@@ -383,6 +543,25 @@ test "kill resolve single mode refuses ambiguous matches" {
         entryIPv4(3000, 456, "node", .{ 127, 0, 0, 1 }),
     };
     try std.testing.expectEqual(@as(usize, 2), killcmd.resolve(multiple[0..], .single).ambiguous);
+}
+
+test "kill targets each process once when it owns multiple listeners" {
+    const entries = [_]PortEntry{
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv6(3000, 123, "node", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
+        entryIPv4(3000, 456, "ruby", .{ 127, 0, 0, 1 }),
+    };
+
+    const targets = try killcmd.uniqueProcessTargets(std.testing.allocator, &entries);
+    defer std.testing.allocator.free(targets);
+
+    try std.testing.expectEqual(@as(usize, 2), targets.len);
+    try std.testing.expectEqual(@as(u32, 123), targets[0].pid);
+    try std.testing.expectEqual(@as(u32, 456), targets[1].pid);
+
+    const one_process = try killcmd.uniqueProcessTargets(std.testing.allocator, entries[0..2]);
+    defer std.testing.allocator.free(one_process);
+    try std.testing.expectEqual(@as(u32, 123), killcmd.resolve(one_process, .single).one.pid);
 }
 
 test "kill resolve all mode targets every match" {
@@ -588,6 +767,25 @@ test "JSON output renders valid fields and escapes process names" {
     );
 }
 
+test "default JSON keeps its schema for multiple endpoints of one process" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    const entries = [_]PortEntry{
+        entryIPv4(3000, 123, "node", .{ 127, 0, 0, 1 }),
+        entryIPv6(3000, 123, "node", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
+    };
+    try output.writeJson(&writer.writer, &entries, .{});
+
+    try std.testing.expectEqualStrings(
+        "[\n" ++
+            "  {\"port\":3000,\"pid\":123,\"proto\":\"tcp\",\"process\":\"node\",\"address\":\"127.0.0.1\"},\n" ++
+            "  {\"port\":3000,\"pid\":123,\"proto\":\"tcp\",\"process\":\"node\",\"address\":\"::1\"}\n" ++
+            "]\n",
+        writer.written(),
+    );
+}
+
 test "JSON output escapes control characters" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -612,6 +810,22 @@ test "JSON output renders IPv6 addresses" {
     try output.writeJson(&writer.writer, entries[0..], .{});
 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"2001:db8::1\"") != null);
+}
+
+test "JSON output renders scoped IPv6 addresses" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    var entries = [_]PortEntry{entryIPv6(8080, 42, "server", .{
+        0xfe, 0x80, 0, 0,
+        0,    0,    0, 0,
+        0,    0,    0, 0,
+        0,    0,    0, 1,
+    })};
+    entries[0].scope_id = 7;
+    try output.writeJson(&writer.writer, entries[0..], .{});
+
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "\"address\":\"fe80::1%7\"") != null);
 }
 
 test "verbose table renders USER and COMMAND columns" {
@@ -810,6 +1024,49 @@ test "docker parsePsOutput maps host ports to containers" {
     try std.testing.expect(docker.lookup(mappings, 9999) == null);
 }
 
+test "docker lookup resolves address-specific mappings on the same port" {
+    const text =
+        "web4\tnginx:alpine\t127.0.0.1:18080->80/tcp\n" ++
+        "web6\tnginx:alpine\t[::1]:18080->81/tcp\n";
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+
+    const ipv4 = entryIPv4(18080, 1, "com.docker.backend", .{ 127, 0, 0, 1 });
+    const ipv6 = entryIPv6(18080, 1, "com.docker.backend", .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+
+    const c4 = docker.lookupEntry(mappings, &ipv4) orelse return error.MissingIpv4Mapping;
+    try std.testing.expectEqualStrings("web4", c4.name);
+    try std.testing.expectEqual(@as(u16, 80), c4.container_port);
+
+    const c6 = docker.lookupEntry(mappings, &ipv6) orelse return error.MissingIpv6Mapping;
+    try std.testing.expectEqualStrings("web6", c6.name);
+    try std.testing.expectEqual(@as(u16, 81), c6.container_port);
+}
+
+test "docker lookup does not guess across conflicting port mappings" {
+    const text =
+        "web4\tnginx:alpine\t0.0.0.0:18080->80/tcp\n" ++
+        "web6\tcaddy:alpine\t[::]:18080->81/tcp\n";
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+
+    const unmatched = entryIPv4(18080, 1, "com.docker.backend", .{ 127, 0, 0, 1 });
+    try std.testing.expect(docker.lookupEntry(mappings, &unmatched) == null);
+}
+
+test "docker lookup ignores UDP publications on a TCP listener port" {
+    const text =
+        "web\tnginx:alpine\t127.0.0.1:18080->80/tcp\n" ++
+        "dns\tdnsmasq:latest\t127.0.0.1:18080->53/udp\n";
+    const mappings = try docker.parsePsOutput(std.testing.allocator, text);
+    defer std.testing.allocator.free(mappings);
+
+    const listener = entryIPv4(18080, 1, "com.docker.backend", .{ 127, 0, 0, 1 });
+    const container = docker.lookupEntry(mappings, &listener) orelse return error.MissingTcpMapping;
+    try std.testing.expectEqualStrings("web", container.name);
+    try std.testing.expectEqual(@as(u16, 80), container.container_port);
+}
+
 test "docker parsePsOutput expands published port ranges" {
     const text = "web\tnginx:alpine\t0.0.0.0:8000-8002->80-82/tcp\n";
 
@@ -940,6 +1197,27 @@ fn boundPort(fd: std.c.fd_t) !u16 {
     var len: std.c.socklen_t = @sizeOf(std.c.sockaddr.in);
     if (std.c.getsockname(fd, @ptrCast(&addr), &len) != 0) return error.GetSockNameFailed;
     return std.mem.bigToNative(u16, addr.port);
+}
+
+fn listenOnIpv6Port(port: u16, address: [16]u8) !std.c.fd_t {
+    const fd = std.c.socket(std.c.AF.INET6, std.c.SOCK.STREAM, std.c.IPPROTO.TCP);
+    if (fd < 0) return error.SocketFailed;
+    errdefer _ = std.c.close(fd);
+
+    var one: c_int = 1;
+    const IPV6_V6ONLY: u32 = 27;
+    if (std.c.setsockopt(fd, std.c.IPPROTO.IPV6, IPV6_V6ONLY, &one, @sizeOf(c_int)) != 0)
+        return error.SetSockOptFailed;
+
+    var addr = std.mem.zeroes(std.c.sockaddr.in6);
+    addr.len = @sizeOf(std.c.sockaddr.in6);
+    addr.family = std.c.AF.INET6;
+    addr.port = std.mem.nativeToBig(u16, port);
+    addr.addr = address;
+
+    if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(std.c.sockaddr.in6)) != 0) return error.BindFailed;
+    if (std.c.listen(fd, 1) != 0) return error.ListenFailed;
+    return fd;
 }
 
 fn entryIPv4(port: u16, pid: u32, name: []const u8, addr: [4]u8) PortEntry {

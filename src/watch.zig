@@ -6,18 +6,18 @@ const WatchEntry = types.WatchEntry;
 const RowState = types.RowState;
 
 pub fn classify(allocator: std.mem.Allocator, previous: []const PortEntry, current: []const PortEntry) ![]WatchEntry {
-    var previous_by_key: std.AutoArrayHashMapUnmanaged(u64, PortEntry) = .empty;
+    var previous_by_key: std.AutoArrayHashMapUnmanaged(types.ListenerKey, PortEntry) = .empty;
     defer previous_by_key.deinit(allocator);
 
     for (previous) |entry| {
-        try previous_by_key.put(allocator, types.portPidKey(entry.port, entry.pid), entry);
+        try previous_by_key.put(allocator, types.listenerKey(&entry), entry);
     }
 
     var result: std.ArrayList(WatchEntry) = .empty;
     errdefer result.deinit(allocator);
 
     for (current) |entry| {
-        const key = types.portPidKey(entry.port, entry.pid);
+        const key = types.listenerKey(&entry);
         const state: RowState = if (previous_by_key.contains(key)) .unchanged else .new;
         _ = previous_by_key.swapRemove(key);
         try result.append(allocator, .{ .entry = entry, .state = state });
@@ -28,11 +28,10 @@ pub fn classify(allocator: std.mem.Allocator, previous: []const PortEntry, curre
     }
 
     std.mem.sort(WatchEntry, result.items, {}, struct {
-        fn lt(_: void, a: WatchEntry, b: WatchEntry) bool {
-            if (a.entry.port != b.entry.port) return a.entry.port < b.entry.port;
-            return a.entry.pid < b.entry.pid;
+        fn lessThan(_: void, a: WatchEntry, b: WatchEntry) bool {
+            return types.listenerLessThan({}, a.entry, b.entry);
         }
-    }.lt);
+    }.lessThan);
 
     return try result.toOwnedSlice(allocator);
 }

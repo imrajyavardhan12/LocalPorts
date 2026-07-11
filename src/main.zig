@@ -38,12 +38,8 @@ pub fn main(init: std.process.Init) !void {
         .scan => {},
     }
 
-    const entries = blk: {
-        const raw = try doScan(allocator, config.filter_port);
-        if (!config.exposed) break :blk raw;
-        defer allocator.free(raw);
-        break :blk try types.filterExposed(allocator, raw);
-    };
+    const scan_result = try scanWithFilter(allocator, config.filter_port, config.exposed);
+    const entries = scan_result.entries;
     defer allocator.free(entries);
 
     // Enriched fields (user/command/ancestors) are arena-backed; one deinit
@@ -57,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
         @import("docker.zig").enrich(enrich_arena.allocator(), entries, init.io);
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config), .max_width = terminalWidth() };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config, init.io), .max_width = terminalWidth() };
     var out_buf: [65536]u8 = undefined;
     var file_writer = std.Io.File.stdout().writer(init.io, &out_buf);
     const w = &file_writer.interface;
@@ -67,6 +63,7 @@ pub fn main(init: std.process.Init) !void {
         try output.writeTable(w, entries, opts);
     }
     try w.flush();
+    if (!config.json_output) try warnIfIncomplete(init.io, scan_result.diagnostics);
 }
 
 fn doEnrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tree: bool) void {
@@ -75,25 +72,52 @@ fn doEnrich(arena: std.mem.Allocator, entries: []PortEntry, verbose: bool, tree:
     }
 }
 
-fn doScan(allocator: std.mem.Allocator, filter_port: ?u16) ![]PortEntry {
+fn doScanReporting(allocator: std.mem.Allocator, filter_port: ?u16) !types.ScanResult {
     if (builtin.os.tag == .macos) {
-        return @import("darwin.zig").scan(allocator, filter_port);
+        return @import("darwin.zig").scanReporting(allocator, filter_port);
     } else if (builtin.os.tag == .linux) {
-        return @import("linux.zig").scan(allocator, filter_port);
+        return @import("linux.zig").scanReporting(allocator, filter_port);
     } else {
         @compileError("Unsupported operating system");
     }
 }
 
+fn scanWithFilter(allocator: std.mem.Allocator, filter_port: ?u16, exposed: bool) !types.ScanResult {
+    var result = try doScanReporting(allocator, filter_port);
+    if (!exposed) return result;
+
+    const filtered = types.filterExposed(allocator, result.entries) catch |err| {
+        allocator.free(result.entries);
+        return err;
+    };
+    allocator.free(result.entries);
+    result.entries = filtered;
+    return result;
+}
+
 /// Decide whether to emit ANSI color: never with `--no-color`, never when
 /// NO_COLOR is set to a non-empty value (https://no-color.org), and otherwise
 /// only when stdout is a terminal (so piped/redirected output stays clean).
-fn useColor(config: cli.Config) bool {
+fn useColor(config: cli.Config, io: std.Io) bool {
     if (config.no_color) return false;
     if (std.c.getenv("NO_COLOR")) |v| {
         if (v[0] != 0) return false; // present and non-empty
     }
-    return std.c.isatty(std.posix.STDOUT_FILENO) != 0;
+    return stdoutIsTerminal(io);
+}
+
+fn stdoutIsTerminal(io: std.Io) bool {
+    return std.Io.File.stdout().isTty(io) catch false;
+}
+
+fn warnIfIncomplete(io: std.Io, diagnostics: types.ScanDiagnostics) !void {
+    if (!stdoutIsTerminal(io) or !diagnostics.mayBeIncomplete()) return;
+
+    var err_buf: [512]u8 = undefined;
+    var file_writer = std.Io.File.stderr().writer(io, &err_buf);
+    const writer = &file_writer.interface;
+    try output.writeScanWarning(writer, diagnostics);
+    try writer.flush();
 }
 
 const Winsize = extern struct { row: u16, col: u16, xpixel: u16, ypixel: u16 };
@@ -192,15 +216,11 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
         if (previous_arena) |*a| a.deinit();
     }
 
-    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config), .max_width = terminalWidth() };
+    const opts: output.Options = .{ .verbose = config.verbose, .tree = config.tree, .docker = config.docker, .exposed = config.exposed, .color = useColor(config, io), .max_width = terminalWidth() };
 
     while (true) {
-        var current_entries: ?[]PortEntry = blk: {
-            const raw = try doScan(allocator, config.filter_port);
-            if (!config.exposed) break :blk raw;
-            defer allocator.free(raw);
-            break :blk try types.filterExposed(allocator, raw);
-        };
+        const scan_result = try scanWithFilter(allocator, config.filter_port, config.exposed);
+        var current_entries: ?[]PortEntry = scan_result.entries;
         errdefer if (current_entries) |entries| allocator.free(entries);
 
         // Enrich current entries with an arena (freed at the end of the next
@@ -225,6 +245,7 @@ fn watchLoop(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !void
         var file_writer = std.Io.File.stdout().writer(io, &out_buf);
         const w = &file_writer.interface;
         try output.writeWatchTable(w, watch_entries, opts);
+        if (stdoutIsTerminal(io)) try output.writeScanWarning(w, scan_result.diagnostics);
         if (!watch.hasChanges(watch_entries) and watch_entries.len > 0) {
             try w.writeAll("No changes detected.\n");
         }
@@ -254,8 +275,14 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
     }
 
     const port = config.kill_port.?;
-    const entries = try doScan(allocator, port);
+    const scan_result = try doScanReporting(allocator, port);
+    const entries = scan_result.entries;
     defer allocator.free(entries);
+    if (scan_result.diagnostics.truncated) {
+        fatal("port scan remained truncated after retries; refusing to kill");
+    }
+    const targets = try killcmd.uniqueProcessTargets(allocator, entries);
+    defer allocator.free(targets);
 
     const mode: killcmd.KillMode = if (config.kill_all)
         .all
@@ -264,8 +291,8 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
     else
         .single;
 
-    const resolution = killcmd.resolve(entries, mode);
-    if (killcmd.unsafeDockerPortKillTarget(entries, resolution)) |target| {
+    const resolution = killcmd.resolve(targets, mode);
+    if (killcmd.unsafeDockerPortKillTarget(targets, resolution)) |target| {
         try refuseDockerPortKill(allocator, entries, target, port, io);
     }
 
@@ -299,11 +326,11 @@ fn killHandler(allocator: std.mem.Allocator, config: cli.Config, io: std.Io) !vo
         },
         .many => {
             if (!config.force_kill) {
-                std.debug.print("Kill all {d} processes on port {d}? [y/N] ", .{ entries.len, port });
+                std.debug.print("Kill all {d} processes on port {d}? [y/N] ", .{ targets.len, port });
                 if (!confirmYes()) std.process.exit(2);
             }
             var any_failed = false;
-            for (entries) |entry| {
+            for (targets) |entry| {
                 const result = try terminate(entry.pid, io);
                 reportTerminate(result, entry.name[0..entry.name_len], entry.pid);
                 if (!terminateSucceeded(result)) any_failed = true;

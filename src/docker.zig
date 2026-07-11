@@ -24,7 +24,13 @@ pub fn isDockerProcess(name: []const u8) bool {
 /// A single host-port → container mapping parsed from `docker ps`.
 pub const Mapping = struct {
     host_port: u16,
+    host_address: ?HostAddress,
     container: Container,
+};
+
+pub const HostAddress = union(enum) {
+    ipv4: [4]u8,
+    ipv6: [16]u8,
 };
 
 /// Parse `docker ps` output where each line is `name\timage\tports` and the
@@ -51,6 +57,8 @@ pub fn parsePsOutput(allocator: std.mem.Allocator, text: []const u8) ![]Mapping 
         while (tokens.next()) |raw| {
             const tok = std.mem.trim(u8, raw, " ");
             const arrow = std.mem.indexOf(u8, tok, "->") orelse continue;
+            if (!std.mem.endsWith(u8, tok, "/tcp")) continue;
+            const host_address = hostAddressBeforeLastColon(tok[0..arrow]);
             const host_ports = portRangeAfterLastColon(tok[0..arrow]) orelse continue;
             const ctr_ports = portRangeBeforeSlash(tok[arrow + 2 ..]) orelse continue;
             if (host_ports.count() != ctr_ports.count()) continue;
@@ -60,6 +68,7 @@ pub fn parsePsOutput(allocator: std.mem.Allocator, text: []const u8) ![]Mapping 
                 const off: u32 = @intCast(offset);
                 try list.append(allocator, .{
                     .host_port = @intCast(@as(u32, host_ports.start) + off),
+                    .host_address = host_address,
                     .container = .{
                         .name = name,
                         .image = image,
@@ -70,6 +79,11 @@ pub fn parsePsOutput(allocator: std.mem.Allocator, text: []const u8) ![]Mapping 
         }
     }
 
+    std.mem.sort(Mapping, list.items, {}, struct {
+        fn lessThan(_: void, a: Mapping, b: Mapping) bool {
+            return a.host_port < b.host_port;
+        }
+    }.lessThan);
     return list.toOwnedSlice(allocator);
 }
 
@@ -85,6 +99,19 @@ const PortRange = struct {
 fn portRangeAfterLastColon(s: []const u8) ?PortRange {
     const idx = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
     return parsePortRange(s[idx + 1 ..]);
+}
+
+fn hostAddressBeforeLastColon(s: []const u8) ?HostAddress {
+    const idx = std.mem.lastIndexOfScalar(u8, s, ':') orelse return null;
+    var text = s[0..idx];
+    if (text.len >= 2 and text[0] == '[' and text[text.len - 1] == ']') {
+        text = text[1 .. text.len - 1];
+    }
+    const address = std.Io.net.IpAddress.parse(text, 0) catch return null;
+    return switch (address) {
+        .ip4 => |ip4| .{ .ipv4 = ip4.bytes },
+        .ip6 => |ip6| .{ .ipv6 = ip6.bytes },
+    };
 }
 
 fn portRangeBeforeSlash(s: []const u8) ?PortRange {
@@ -105,10 +132,66 @@ fn parsePortRange(s: []const u8) ?PortRange {
 }
 
 pub fn lookup(mappings: []const Mapping, host_port: u16) ?Container {
-    for (mappings) |m| {
-        if (m.host_port == host_port) return m.container;
+    const start = firstMappingIndex(mappings, host_port) orelse return null;
+    return mappings[start].container;
+}
+
+pub fn lookupEntry(mappings: []const Mapping, entry: *const PortEntry) ?Container {
+    const start = firstMappingIndex(mappings, entry.port) orelse return null;
+    var exact: ?Container = null;
+    var exact_conflict = false;
+    var fallback: ?Container = null;
+    var fallback_conflict = false;
+
+    for (mappings[start..]) |mapping| {
+        if (mapping.host_port != entry.port) break;
+
+        if (fallback) |current| {
+            if (!sameContainer(current, mapping.container)) fallback_conflict = true;
+        } else {
+            fallback = mapping.container;
+        }
+
+        const host_address = mapping.host_address orelse continue;
+        if (!addressMatches(host_address, entry)) continue;
+        if (exact) |current| {
+            if (!sameContainer(current, mapping.container)) exact_conflict = true;
+        } else {
+            exact = mapping.container;
+        }
     }
+
+    if (exact) |container| return if (exact_conflict) null else container;
+    if (fallback) |container| return if (fallback_conflict) null else container;
     return null;
+}
+
+fn firstMappingIndex(mappings: []const Mapping, host_port: u16) ?usize {
+    var low: usize = 0;
+    var high = mappings.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (mappings[middle].host_port < host_port) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if (low == mappings.len or mappings[low].host_port != host_port) return null;
+    return low;
+}
+
+fn addressMatches(address: HostAddress, entry: *const PortEntry) bool {
+    return switch (address) {
+        .ipv4 => |bytes| !entry.is_ipv6 and std.mem.eql(u8, &bytes, &entry.addr4),
+        .ipv6 => |bytes| entry.is_ipv6 and std.mem.eql(u8, &bytes, &entry.addr6),
+    };
+}
+
+fn sameContainer(a: Container, b: Container) bool {
+    return a.container_port == b.container_port and
+        std.mem.eql(u8, a.name, b.name) and
+        std.mem.eql(u8, a.image, b.image);
 }
 
 /// Resolve the owning container for each Docker-held listener. Best-effort:
@@ -131,7 +214,7 @@ pub fn enrich(arena: std.mem.Allocator, entries: []PortEntry, io: std.Io) void {
 
     for (entries) |*e| {
         if (!isDockerProcess(e.name[0..e.name_len])) continue;
-        e.container = lookup(mappings, e.port);
+        e.container = lookupEntry(mappings, e);
     }
 }
 

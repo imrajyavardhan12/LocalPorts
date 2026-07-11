@@ -37,6 +37,29 @@ pub const Options = struct {
     max_width: ?usize = null,
 };
 
+pub fn writeScanWarning(writer: anytype, diagnostics: types.ScanDiagnostics) !void {
+    if (!diagnostics.mayBeIncomplete()) return;
+
+    try writer.writeAll("warning: scan may be incomplete");
+    if (diagnostics.inaccessible_processes > 0) {
+        try writer.print("; {d} process{s} could not be inspected", .{
+            diagnostics.inaccessible_processes,
+            if (diagnostics.inaccessible_processes == 1) "" else "es",
+        });
+    }
+    if (diagnostics.malformed_results > 0) {
+        try writer.print("; {d} malformed result{s}", .{
+            diagnostics.malformed_results,
+            if (diagnostics.malformed_results == 1) "" else "s",
+        });
+    }
+    if (diagnostics.truncated) {
+        try writer.writeAll("; process data remained saturated after retries");
+    }
+    if (diagnostics.inaccessible_processes > 0) try writer.writeAll(" (try sudo)");
+    try writer.writeByte('\n');
+}
+
 /// Write `text` clamped to `max` columns, collapsing the middle to a single
 /// ellipsis ("head…tail") when it is too long. Middle truncation keeps both the
 /// program name and trailing arguments (e.g. a port) — far more useful for a
@@ -383,15 +406,19 @@ fn padWrite(writer: anytype, s: []const u8, col_width: usize) !void {
 }
 
 fn writeAddrStr(writer: anytype, e: *const PortEntry) !void {
-    var buf: [46]u8 = undefined;
+    var buf: [64]u8 = undefined;
     try writer.writeAll(formatAddr(&buf, e));
 }
 
-/// Render an address into `buf` and return the written slice. `buf` must be at
-/// least 39 bytes (longest is a full eight-group IPv6 address). Single source of
+/// Render an address into `buf` and return the written slice. Single source of
 /// truth for both rendering and column-width measurement.
 fn formatAddr(buf: []u8, e: *const PortEntry) []const u8 {
-    if (e.is_ipv6) return formatIpv6(buf, &e.addr6);
+    if (e.is_ipv6) {
+        const address = formatIpv6(buf, &e.addr6);
+        if (e.scope_id == 0) return address;
+        const suffix = std.fmt.bufPrint(buf[address.len..], "%{d}", .{e.scope_id}) catch unreachable;
+        return buf[0 .. address.len + suffix.len];
+    }
     const b = &e.addr4;
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ b[0], b[1], b[2], b[3] }) catch unreachable;
 }
