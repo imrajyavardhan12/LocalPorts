@@ -377,13 +377,6 @@ jobs:
           owner: imrajyavardhan12
           repositories: homebrew-localports
 
-      - name: Verify tap write permission
-        env:
-          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          test "$(gh api repos/imrajyavardhan12/homebrew-localports --jq .permissions.push)" = "true"
-
       - name: Check out Homebrew tap
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
         with:
@@ -391,6 +384,9 @@ jobs:
           token: ${{ steps.tap-token.outputs.token }}
           path: homebrew-localports
           fetch-depth: 1
+
+      - name: Verify tap write permission
+        run: git -C homebrew-localports push --dry-run origin HEAD:main
 
       - name: Validate current Homebrew formula
         run: |
