@@ -7,16 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed vX.Y.Z tag to validate or synchronize
+        description: Existing signed vX.Y.Z tag to validate, verify, or synchronize
         required: true
         type: string
       mode:
-        description: Non-publishing verification or recovery tap synchronization
+        description: Dry run, non-mutating tap verification, or recovery synchronization
         required: true
         default: dry-run
         type: choice
         options:
           - dry-run
+          - verify-tap
           - sync-tap
 
 permissions:
@@ -57,8 +58,8 @@ jobs:
             echo "error: configure the protected release Environment, then set repository variable RELEASE_PIPELINE_ENABLED=true before publishing" >&2
             exit 1
           fi
-          if [[ "${REQUESTED_MODE}" == "release" && -z "${TAP_APP_ID}" ]]; then
-            echo "error: configure repository variable TAP_APP_ID before publishing" >&2
+          if [[ "${REQUESTED_MODE}" != "dry-run" && -z "${TAP_APP_ID}" ]]; then
+            echo "error: configure repository variable TAP_APP_ID before verifying or publishing the Homebrew tap" >&2
             exit 1
           fi
           bash scripts/release-preflight.sh "${RELEASE_TAG}"
@@ -71,7 +72,7 @@ jobs:
 
   build-native:
     needs: preflight
-    if: needs.preflight.outputs.mode != 'sync-tap'
+    if: needs.preflight.outputs.mode != 'sync-tap' && needs.preflight.outputs.mode != 'verify-tap'
     strategy:
       fail-fast: false
       matrix:
@@ -140,7 +141,7 @@ jobs:
     needs:
       - preflight
       - build-native
-    if: needs.preflight.outputs.mode != 'sync-tap'
+    if: needs.preflight.outputs.mode != 'sync-tap' && needs.preflight.outputs.mode != 'verify-tap'
     runs-on: macos-14
     permissions:
       attestations: write
@@ -358,3 +359,44 @@ jobs:
           test -n "${arm_sha}"
           test -n "${x64_sha}"
           bash scripts/sync-homebrew-tap.sh homebrew-localports "${TAG}" "${arm_sha}" "${x64_sha}"
+
+  verify-tap:
+    needs: preflight
+    if: needs.preflight.outputs.mode == 'verify-tap'
+    runs-on: macos-14
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint tap token
+        id: tap-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.11.0
+        with:
+          app-id: ${{ vars.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: imrajyavardhan12
+          repositories: homebrew-localports
+
+      - name: Verify tap write permission
+        env:
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/imrajyavardhan12/homebrew-localports --jq .permissions.push)" = "true"
+
+      - name: Check out Homebrew tap
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.0
+        with:
+          repository: imrajyavardhan12/homebrew-localports
+          token: ${{ steps.tap-token.outputs.token }}
+          path: homebrew-localports
+          fetch-depth: 1
+
+      - name: Validate current Homebrew formula
+        run: |
+          set -euo pipefail
+          formula="homebrew-localports/Formula/localports.rb"
+          test -f "${formula}"
+          ruby -c "${formula}"
+          brew style --strict "${formula}"
+          brew audit --strict --formula "${formula}"
