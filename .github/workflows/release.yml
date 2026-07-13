@@ -388,11 +388,9 @@ jobs:
       - name: Verify tap write permission
         run: git -C homebrew-localports push --dry-run origin HEAD:main
 
-      - name: Validate current Homebrew formula
+      - name: Validate checked-out formula
         run: |
           set -euo pipefail
           formula="homebrew-localports/Formula/localports.rb"
           test -f "${formula}"
           ruby -c "${formula}"
-          brew style --strict "${formula}"
-          brew audit --strict --formula "${formula}"

@@ -1,7 +1,6 @@
 class Localports < Formula
   desc "Fast local TCP port inspector for macOS"
   homepage "https://github.com/imrajyavardhan12/LocalPorts"
-  version "VERSION_PLACEHOLDER"
   license "MIT"
 
   # The release workflow cross-compiles the binaries, uploads them as release
